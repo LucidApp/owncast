@@ -1,6 +1,7 @@
+import { AutoplaySetting } from '../utils/autoplay';
 import { useEffect } from 'react';
-import { StoryFn, Meta } from '@storybook/react';
-import { RecoilRoot, useRecoilState, useSetRecoilState } from 'recoil';
+import { StoryFn, Meta } from '@storybook/nextjs';
+import { Provider, useAtom, useSetAtom } from 'jotai';
 import ReadWritePage from '../pages/embed/chat/readwrite/index';
 import { ChatMessage } from '../interfaces/chat-message.model';
 import {
@@ -25,21 +26,25 @@ const testMessages =
 const messages: ChatMessage[] = JSON.parse(testMessages);
 
 const Page = () => {
-  const [currentUser, setCurrentUser] = useRecoilState(currentUserAtom);
-  const setMessages = useSetRecoilState(chatMessagesAtom);
-  const setClientConfig = useSetRecoilState<ClientConfig>(clientConfigStateAtom);
+  const [currentUser, setCurrentUser] = useAtom(currentUserAtom);
+  const setMessages = useSetAtom(chatMessagesAtom);
+  const setClientConfig = useSetAtom(clientConfigStateAtom);
 
   const fakeConfig: ClientConfig = {
     chatDisabled: false,
+    chatRequireAuthentication: false,
     name: 'Fake Owncast Server',
     summary: '',
     logo: '',
     tags: [],
     nsfw: false,
+    autoplay: AutoplaySetting.Off,
     extraPageContent: '',
     socialHandles: [],
     externalActions: [],
     customStyles: '',
+    pluginStyles: '',
+    pluginTabs: [],
     maxSocketPayloadSize: 0,
     federation: undefined,
     notifications: undefined,
@@ -61,9 +66,9 @@ const Page = () => {
 };
 
 const Template: StoryFn<typeof ReadWritePage> = () => (
-  <RecoilRoot>
+  <Provider>
     <Page />
-  </RecoilRoot>
+  </Provider>
 );
 
 export const Example = {

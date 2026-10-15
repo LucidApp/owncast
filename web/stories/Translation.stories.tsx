@@ -1,4 +1,4 @@
-import { Meta, StoryObj } from '@storybook/react';
+import { Meta, StoryObj } from '@storybook/nextjs';
 import { Translation } from '../components/ui/Translation/Translation';
 import { Localization } from '../types/localization';
 
@@ -60,9 +60,9 @@ export const ComplexHTMLTranslation: Story = {
   },
 };
 
-export const NotificationMessage: Story = {
+export const ComplexHTMLMessage: Story = {
   args: {
-    translationKey: Localization.Frontend.notificationMessage,
+    translationKey: Localization.Frontend.offlineNotifyOnly,
     vars: {
       streamer: 'MyAwesomeStream',
     },

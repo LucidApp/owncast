@@ -1,7 +1,17 @@
+# This workflow checks CSS/SCSS code quality and formatting
+# Triggers:
+#   - Push/PR with changes to web/ directory
+# Checks:
+#   - Prettier formatting for CSS/SCSS files
+#   - Stylelint rules for code quality
+# Note: Only runs when CSS or SCSS files are changed
+
 name: CSS Lint and Formatting
 
 on:
   push:
+    branches:
+      - develop
     paths:
       - 'web/**'
   pull_request:
@@ -17,29 +27,43 @@ jobs:
 
     steps:
       - name: Check out pull request code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         if: github.event_name == 'pull_request'
         with:
           repository: ${{ github.event.pull_request.head.repo.full_name }}
           ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+
+      - name: Fetch base branch for comparison
+        if: github.event_name == 'pull_request'
+        run: |
+          git remote add upstream https://github.com/${{ github.event.pull_request.base.repo.full_name }}.git || true
+          git fetch upstream ${{ github.event.pull_request.base.ref }}
 
       - name: Check out repository code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         if: github.event_name == 'push'
 
       - name: Get changed files
         id: changed-files-yaml
-        uses: tj-actions/changed-files@v46
+        uses: tj-actions/changed-files@v47
         with:
           path: 'web'
+          # Negation patterns must live inside the files_yaml group; the
+          # top-level files_ignore option is not applied when files_yaml is
+          # used. These two are generated style-dictionary outputs and are in
+          # .stylelintignore, so passing them to stylelint aborts the run with
+          # AllFilesIgnoredError.
           files_yaml: |
             src:
               - '**/*.{css,scss}'
+              - '!public/styles/plugin.css'
+              - '!styles/variables.css'
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: '22.18.0'
+          node-version: '24.12.0'
 
       - name: Install dependencies
         if: steps.changed-files-yaml.outputs.src_any_changed == 'true'
@@ -51,4 +75,4 @@ jobs:
 
       - name: Run Stylelint
         if: steps.changed-files-yaml.outputs.src_any_changed == 'true'
-        run: npx stylelint ${{ steps.changed-files-yaml.outputs.src_all_changed_files }}
+        run: npx stylelint --allow-empty-input ${{ steps.changed-files-yaml.outputs.src_all_changed_files }}

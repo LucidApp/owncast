@@ -1,22 +1,25 @@
+/* eslint-disable max-classes-per-file */
 import React, { FC, useContext, useEffect } from 'react';
-import { useRecoilState, useRecoilValue } from 'recoil';
+import { useAtom, useAtomValue } from 'jotai';
 import { useHotkeys } from 'react-hotkeys-hook';
+import { useTranslation } from 'next-export-i18n';
 import classNames from 'classnames';
-import { ErrorBoundary } from 'react-error-boundary';
+import { ErrorBoundary, getErrorMessage } from 'react-error-boundary';
 import { VideoJS } from '../VideoJS/VideoJS';
 import ViewerPing from '../viewer-ping';
 import { VideoPoster } from '../VideoPoster/VideoPoster';
 import { getLocalStorage, setLocalStorage } from '../../../utils/localStorage';
+import { AutoplaySetting, autoplayModeForSetting } from '../../../utils/autoplay';
+import { Localization } from '../../../types/localization';
 import { isVideoPlayingAtom, clockSkewAtom } from '../../stores/ClientConfigStore';
 import PlaybackMetrics from '../metrics/playback';
-import { createVideoSettingsMenuButton } from '../settings-menu';
+import { createVideoSettingsMenuButton, LATENCY_COMPENSATION_ENABLED } from '../settings-menu';
 import LatencyCompensator from '../latencyCompensator';
 import styles from './OwncastPlayer.module.scss';
 import { VideoSettingsServiceContext } from '../../../services/video-settings-service';
 import { ComponentError } from '../../ui/ComponentError/ComponentError';
 
 const PLAYER_VOLUME = 'owncast_volume';
-const LATENCY_COMPENSATION_ENABLED = 'latencyCompensatorEnabled';
 
 const ping = new ViewerPing();
 let playbackMetrics = null;
@@ -27,6 +30,7 @@ export type OwncastPlayerProps = {
   source: string;
   online: boolean;
   initiallyMuted?: boolean;
+  autoplay?: AutoplaySetting;
   title: string;
   className?: string;
 };
@@ -35,13 +39,22 @@ export const OwncastPlayer: FC<OwncastPlayerProps> = ({
   source,
   online,
   initiallyMuted = false,
+  autoplay = AutoplaySetting.Off,
   title,
   className,
 }) => {
   const VideoSettingsService = useContext(VideoSettingsServiceContext);
   const playerRef = React.useRef(null);
-  const [videoPlaying, setVideoPlaying] = useRecoilState<boolean>(isVideoPlayingAtom);
-  const clockSkew = useRecoilValue<Number>(clockSkewAtom);
+  const [videoPlaying, setVideoPlaying] = useAtom(isVideoPlayingAtom);
+  const clockSkew = useAtomValue(clockSkewAtom);
+  const { t } = useTranslation();
+
+  // A persisted volume of 0 is a mute the viewer chose on a previous visit
+  // (handleVolume stores muted as 0). Restoring it is a manual mute, not an
+  // autoplay one, so the big unmute overlay stays away. Read once at render;
+  // guarded because this runs during render (no window during SSR).
+  const savedVolume = typeof window !== 'undefined' ? getLocalStorage(PLAYER_VOLUME) : null;
+  const startedMutedByViewer = savedVolume !== null && Number(savedVolume) === 0;
 
   const setSavedVolume = () => {
     try {
@@ -81,7 +94,8 @@ export const OwncastPlayer: FC<OwncastPlayerProps> = ({
 
   const startLatencyCompensator = () => {
     if (latencyCompensator) {
-      latencyCompensator.stop();
+      // Fully tear down the old instance so its check timer doesn't leak.
+      latencyCompensator.disable();
     }
 
     latencyCompensatorEnabled = true;
@@ -172,6 +186,77 @@ export const OwncastPlayer: FC<OwncastPlayerProps> = ({
     }
   };
 
+  const setupUnmuteButton = (player, videojs) => {
+    const VJSButtonClass = videojs.getComponent('Button');
+
+    class UnmuteButton extends VJSButtonClass {
+      constructor() {
+        super(player);
+      }
+
+      // eslint-disable-next-line class-methods-use-this
+      handleClick() {
+        player.muted(false);
+        if (player.volume() === 0) {
+          const saved = parseFloat(getLocalStorage(PLAYER_VOLUME));
+          player.volume(saved > 0 ? saved : 0.7);
+        }
+      }
+    }
+
+    const unmuteButton = new UnmuteButton();
+    unmuteButton.addClass('vjs-big-unmute-button');
+    // Localize the control text (exposed to assistive tech and tooltips),
+    // falling back to English when the key has no translation, mirroring the
+    // Translation component's missing-key behavior.
+    const unmuteLabel = t(Localization.Frontend.unmute);
+    unmuteButton.controlText(unmuteLabel === Localization.Frontend.unmute ? 'Unmute' : unmuteLabel);
+    // The overlay glyph is antd's MutedFilled speaker (the icon family used by
+    // the rest of the UI) instead of the video.js icon font. Inlined as SVG
+    // because this button renders into video.js DOM, outside React. Path from
+    // @ant-design/icons-svg MutedFilled. fill=currentColor picks up the theme
+    // action color set in VideoJS.scss.
+    const iconPlaceholder = unmuteButton.el().querySelector('.vjs-icon-placeholder');
+    if (iconPlaceholder) {
+      iconPlaceholder.innerHTML =
+        '<svg viewBox="64 64 896 896" fill="currentColor" fill-rule="evenodd" aria-hidden="true" focusable="false"><path d="M771.91 115a31.65 31.65 0 00-17.42 5.27L400 351.97H236a16 16 0 00-16 16v288.06a16 16 0 0016 16h164l354.5 231.7a31.66 31.66 0 0017.42 5.27c16.65 0 32.08-13.25 32.08-32.06V147.06c0-18.8-15.44-32.06-32.09-32.06"></path></svg>';
+    }
+    player.addChild(unmuteButton);
+
+    // Show the big unmute affordance only while playback is inaudible *because
+    // the player muted it* (video.js's 'any' autoplay fallback, or an embed
+    // that asked to start muted). A viewer who muted deliberately, whether via
+    // the control bar, the "m" key, or a persisted mute restored from a
+    // previous visit (startedMutedByViewer), keeps a clean player: no giant
+    // overlay. The flag is cleared the moment the player becomes audible, so
+    // any later mute is by definition manual and never re-shows the button.
+    const inaudible = () => player.muted() || player.volume() === 0;
+    // Autoplay can win the race against this ready handler (the source is set
+    // at player construction), so seed the flag from current state: already
+    // playing inaudibly at ready means the player did it, since no user
+    // gesture can have happened yet.
+    let mutedByAutoplay = !startedMutedByViewer && !player.paused() && inaudible();
+
+    const updateUnmuteButton = () => {
+      if (!inaudible()) {
+        mutedByAutoplay = false;
+      }
+      if (mutedByAutoplay && !player.paused() && inaudible()) {
+        unmuteButton.show();
+      } else {
+        unmuteButton.hide();
+      }
+    };
+
+    player.on('autoplay-success', () => {
+      mutedByAutoplay = !startedMutedByViewer && inaudible();
+      updateUnmuteButton();
+    });
+
+    player.on(['playing', 'pause', 'ended', 'volumechange'], updateUnmuteButton);
+    updateUnmuteButton();
+  };
+
   // Register keyboard shortcut for the space bar to toggle playback
   useHotkeys('space', e => {
     e.preventDefault();
@@ -195,8 +280,30 @@ export const OwncastPlayer: FC<OwncastPlayerProps> = ({
     enableOnContentEditable: false,
   });
 
+  // Resolve the video.js autoplay value from the instance setting, honoring the
+  // viewer's data-saver and reduced-motion preferences. Guarded because this
+  // runs during render (no window during SSR).
+  const prefersReducedMotion =
+    typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const navConnection =
+    typeof navigator !== 'undefined'
+      ? (navigator as Navigator & { connection?: { saveData?: boolean } }).connection
+      : undefined;
+  // The player restores the persisted volume on ready, and a mute is persisted
+  // as volume 0. Starting muted (embed request) or at volume 0 makes a
+  // sound-only autoplay attempt succeed silently in Firefox, which allows
+  // inaudible autoplay, so the mapping needs to know about it.
+  const startsInaudible = initiallyMuted || startedMutedByViewer;
+  const autoplayMode = autoplayModeForSetting(autoplay, {
+    prefersReducedMotion,
+    saveData: navConnection?.saveData === true,
+    startsInaudible,
+  });
+
   const videoJsOptions = {
-    autoplay: false,
+    autoplay: autoplayMode,
     controls: true,
     responsive: true,
     fluid: false,
@@ -235,6 +342,7 @@ export const OwncastPlayer: FC<OwncastPlayerProps> = ({
     playerRef.current = player;
     setSavedVolume();
     setupAirplay(player, videojs);
+    setupUnmuteButton(player, videojs);
 
     // You can handle player events here, for example:
     player.on('waiting', () => {
@@ -294,7 +402,7 @@ export const OwncastPlayer: FC<OwncastPlayerProps> = ({
       fallbackRender={({ error, resetErrorBoundary }) => (
         <ComponentError
           componentName="OwncastPlayer"
-          message={error.message}
+          message={getErrorMessage(error)}
           retryFunction={resetErrorBoundary}
         />
       )}

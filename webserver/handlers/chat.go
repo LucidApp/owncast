@@ -4,37 +4,36 @@ import (
 	"encoding/json"
 	"net/http"
 
+	log "github.com/sirupsen/logrus"
+
 	"github.com/owncast/owncast/config"
 	"github.com/owncast/owncast/models"
-	"github.com/owncast/owncast/persistence/chatmessagerepository"
-	"github.com/owncast/owncast/persistence/configrepository"
-	"github.com/owncast/owncast/persistence/userrepository"
+	"github.com/owncast/owncast/services/chat"
+	plugins "github.com/owncast/owncast/services/plugins"
 	"github.com/owncast/owncast/utils"
 	"github.com/owncast/owncast/webserver/handlers/generated"
 	"github.com/owncast/owncast/webserver/router/middleware"
 	webutils "github.com/owncast/owncast/webserver/utils"
-	log "github.com/sirupsen/logrus"
 )
 
 // ExternalGetChatMessages gets all of the chat messages.
-func ExternalGetChatMessages(integration models.ExternalAPIUser, w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) ExternalGetChatMessages(integration models.ExternalAPIUser, w http.ResponseWriter, r *http.Request) {
 	middleware.EnableCors(w)
-	getChatMessages(w, r)
+	h.getChatMessages(w, r)
 }
 
 // GetChatMessages gets all of the chat messages.
-func GetChatMessages(u models.User, w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) GetChatMessages(u models.User, w http.ResponseWriter, r *http.Request) {
 	middleware.EnableCors(w)
-	getChatMessages(w, r)
+	h.getChatMessages(w, r)
 }
 
-func getChatMessages(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) getChatMessages(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	switch r.Method {
 	case http.MethodGet:
-		chatMessageRepository := chatmessagerepository.Get()
-		messages := chatMessageRepository.GetChatHistory()
+		messages := h.chatMessageRepository.GetChatHistory()
 
 		if err := json.NewEncoder(w).Encode(messages); err != nil {
 			log.Debugln(err)
@@ -48,10 +47,8 @@ func getChatMessages(w http.ResponseWriter, r *http.Request) {
 }
 
 // RegisterAnonymousChatUser will register a new user.
-func RegisterAnonymousChatUser(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) RegisterAnonymousChatUser(w http.ResponseWriter, r *http.Request) {
 	middleware.EnableCors(w)
-
-	userRepository := userrepository.Get()
 
 	if r.Method == http.MethodOptions {
 		// All OPTIONS requests should have a wildcard CORS header.
@@ -71,6 +68,35 @@ func RegisterAnonymousChatUser(w http.ResponseWriter, r *http.Request) {
 		AccessToken string `json:"accessToken"`
 		DisplayName string `json:"displayName"`
 	}
+	// If the request carries a verified gate session (set by the auth-gate
+	// middleware; empty on servers with no auth.gate plugin), return that
+	// user's existing token rather than creating a new anonymous one.
+	// Fail closed on any problem: a gate session with no resolvable user
+	// must never fall through to CreateAnonymousUser — that would create an
+	// anon row and trigger an infinite re-registration loop via the /ws
+	// mismatch guard.
+	if tok := plugins.SessionTokenFromContext(r.Context()); tok != "" {
+		u := h.userRepository.GetUserByToken(tok)
+		if u == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(models.BaseAPIResponse{Success: false, Message: "gate session invalid"})
+			return
+		}
+		if u.DisabledAt != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(models.BaseAPIResponse{Success: false, Message: "user is disabled"})
+			return
+		}
+		utils.SetChatAccessTokenCookie(w, r, tok)
+		webutils.WriteResponse(w, registerAnonymousUserResponse{
+			ID:          u.ID,
+			AccessToken: tok,
+			DisplayName: u.DisplayName,
+		})
+		return
+	}
 
 	decoder := json.NewDecoder(r.Body)
 	var request generated.RegisterAnonymousChatUserJSONBody // registerAnonymousUserRequest
@@ -82,12 +108,22 @@ func RegisterAnonymousChatUser(w http.ResponseWriter, r *http.Request) {
 	if proposedNewDisplayName == "" && request.DisplayName != nil {
 		proposedNewDisplayName = *request.DisplayName
 	}
-	if proposedNewDisplayName == "" {
-		proposedNewDisplayName = generateDisplayName()
-	}
 
+	// Sanitize before the empty check so a proposed name that sanitizes to
+	// nothing (e.g. only HTML tags or whitespace) still falls back to a
 	proposedNewDisplayName = utils.MakeSafeStringOfLength(proposedNewDisplayName, config.MaxChatDisplayNameLength)
-	newUser, accessToken, err := userRepository.CreateAnonymousUser(proposedNewDisplayName)
+	if _, forbidden := chat.ForbiddenUsername(proposedNewDisplayName, h.configRepository.GetForbiddenUsernameList()); forbidden {
+		proposedNewDisplayName = ""
+	}
+	if proposedNewDisplayName == "" {
+		proposedNewDisplayName = utils.MakeSafeStringOfLength(h.generateDisplayName(), config.MaxChatDisplayNameLength)
+	}
+	if proposedNewDisplayName == "" {
+		// An admin-configured suggested username can itself sanitize to
+		// empty; GeneratePhrase always yields a usable word-word name.
+		proposedNewDisplayName = utils.MakeSafeStringOfLength(utils.GeneratePhrase(), config.MaxChatDisplayNameLength)
+	}
+	newUser, accessToken, err := h.userRepository.CreateAnonymousUser(proposedNewDisplayName)
 	if err != nil {
 		webutils.WriteSimpleResponse(w, false, err.Error())
 		return
@@ -102,12 +138,15 @@ func RegisterAnonymousChatUser(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	middleware.DisableCache(w)
 
+	// Set the chat identity cookie so subsequent same-origin web requests
+	// (e.g. to plugin HTTP handlers) carry this user's identity.
+	utils.SetChatAccessTokenCookie(w, r, accessToken)
+
 	webutils.WriteResponse(w, response)
 }
 
-func generateDisplayName() string {
-	configRepository := configrepository.Get()
-	suggestedUsernamesList := configRepository.GetSuggestedUsernamesList()
+func (h *Handlers) generateDisplayName() string {
+	suggestedUsernamesList := h.configRepository.GetSuggestedUsernamesList()
 	minSuggestedUsernamePoolLength := 10
 
 	if len(suggestedUsernamesList) >= minSuggestedUsernamePoolLength {

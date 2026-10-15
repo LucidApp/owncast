@@ -1,6 +1,6 @@
 import { Virtuoso } from 'react-virtuoso';
 import { useState, useMemo, useRef, CSSProperties, FC, useEffect } from 'react';
-import { ErrorBoundary } from 'react-error-boundary';
+import { ErrorBoundary, getErrorMessage } from 'react-error-boundary';
 import { Interweave } from 'interweave';
 import {
   ConnectedClientInfoEvent,
@@ -14,8 +14,7 @@ import { ChatUserMessage } from '../ChatUserMessage/ChatUserMessage';
 import { ChatTextField } from '../ChatTextField/ChatTextField';
 import { ChatModeratorNotification } from '../ChatModeratorNotification/ChatModeratorNotification';
 import { ChatSystemMessage } from '../ChatSystemMessage/ChatSystemMessage';
-import { ChatJoinMessage } from '../ChatJoinMessage/ChatJoinMessage';
-import { ChatPartMessage } from '../ChatPartMessage/ChatPartMessage';
+import { ChatEventMessage, ChatEventType } from '../ChatEventMessage/ChatEventMessage';
 import { ScrollToBotBtn } from './ScrollToBotBtn';
 import { ChatActionMessage } from '../ChatActionMessage/ChatActionMessage';
 import { ChatSocialMessage } from '../ChatSocialMessage/ChatSocialMessage';
@@ -33,6 +32,9 @@ export type ChatContainerProps = {
   chatAvailable: boolean;
   focusInput?: boolean;
   desktop?: boolean;
+  readonly?: boolean;
+  inputEnabled?: boolean;
+  inputDisabledPlaceholder?: string;
 };
 
 let resizeWindowCallback: () => void;
@@ -81,10 +83,15 @@ export const ChatContainer: FC<ChatContainerProps> = ({
   isModerator,
   showInput = true,
   height = 'auto',
-  chatAvailable: chatEnabled,
+  chatAvailable,
   desktop,
   focusInput = true,
+  readonly = false,
+  inputEnabled,
+  inputDisabledPlaceholder,
 }) => {
+  // If inputEnabled is explicitly set, use that; otherwise fall back to chatAvailable
+  const chatInputEnabled = inputEnabled !== undefined ? inputEnabled : chatAvailable;
   const [showScrollToBottomButton, setShowScrollToBottomButton] = useState(false);
   const [isAtBottom, setIsAtBottom] = useState(false);
 
@@ -131,7 +138,8 @@ export const ChatContainer: FC<ChatContainerProps> = ({
     } = message;
     const isAuthorModerator = checkIsModerator(message);
     return (
-      <ChatJoinMessage
+      <ChatEventMessage
+        type={ChatEventType.Join}
         displayName={displayName}
         userColor={displayColor}
         isAuthorModerator={isAuthorModerator}
@@ -145,7 +153,8 @@ export const ChatContainer: FC<ChatContainerProps> = ({
     } = message;
     const isAuthorModerator = checkIsModerator(message);
     return (
-      <ChatPartMessage
+      <ChatEventMessage
+        type={ChatEventType.Part}
         displayName={displayName}
         userColor={displayColor}
         isAuthorModerator={isAuthorModerator}
@@ -350,7 +359,7 @@ export const ChatContainer: FC<ChatContainerProps> = ({
       fallbackRender={({ error, resetErrorBoundary }) => (
         <ComponentError
           componentName="ChatContainer"
-          message={error.message}
+          message={getErrorMessage(error)}
           retryFunction={resetErrorBoundary}
         />
       )}
@@ -358,13 +367,17 @@ export const ChatContainer: FC<ChatContainerProps> = ({
       <div
         aria-live="off"
         id="chat-container"
-        className={styles.chatContainer}
+        className={`${styles.chatContainer}${readonly ? ' readonly-chat' : ''}`}
         style={desktop && { width: `${defaultChatWidth}px` }}
       >
         {MessagesTable}
         {showInput && (
           <div className={styles.chatTextField}>
-            <ChatTextField enabled={chatEnabled} focusInput={focusInput} />
+            <ChatTextField
+              enabled={chatInputEnabled}
+              focusInput={focusInput}
+              disabledPlaceholder={inputDisabledPlaceholder}
+            />
           </div>
         )}
         {desktop && (

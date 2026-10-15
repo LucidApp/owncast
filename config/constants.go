@@ -4,7 +4,7 @@ import "path/filepath"
 
 const (
 	// StaticVersionNumber is the version of Owncast that is used when it's not overwritten via build-time settings.
-	StaticVersionNumber = "0.2.3" // Shown when you build from develop
+	StaticVersionNumber = "0.4.0" // Shown when you build from develop
 	// FfmpegSuggestedVersion is the version of ffmpeg we suggest.
 	FfmpegSuggestedVersion = "v4.1.5" // Requires the v
 	// DataDirectory is the directory we save data to.
@@ -16,12 +16,29 @@ const (
 	MaxUserColor = 7
 	// MaxChatDisplayNameLength is the maximum length of a chat display name.
 	MaxChatDisplayNameLength = 30
+
+	// ActivityPub namespace properties for Owncast metadata.
+	APOwncastNamespaceStreamStatus      = "https://owncast.online/ns#streamStatus"
+	APOwncastNamespaceStreamTitle       = "https://owncast.online/ns#streamTitle"
+	APOwncastNamespaceServerName        = "https://owncast.online/ns#serverName"
+	APOwncastNamespaceStreamDescription = "https://owncast.online/ns#streamDescription"
+	APOwncastNamespaceLogoURL           = "https://owncast.online/ns#logoUrl"
+	APOwncastNamespaceThumbnailURL      = "https://owncast.online/ns#thumbnailUrl"
+	APOwncastNamespaceStreamTags        = "https://owncast.online/ns#streamTags"
+	// APOwncastNamespaceDirectory marks a Follow as coming from a directory (or an
+	// Owncast server featuring another). Its presence is what makes the receiver
+	// hold the follow for operator approval and, once approved, send it stream
+	// pings. Unlike the stream-metadata fields above, a directory has no stream of
+	// its own, so this explicit marker is how it identifies itself.
+	APOwncastNamespaceDirectory = "https://owncast.online/ns#directory"
+
+	// APStreamStatusLive is the stream status value for a live stream.
+	APStreamStatusLive = "live"
+	// APStreamStatusOffline is the stream status value for an offline stream.
+	APStreamStatusOffline = "offline"
 )
 
 var (
-	// BackupDirectory is the directory we write backup files to.
-	BackupDirectory = filepath.Join(DataDirectory, "backup")
-
 	// HLSStoragePath is the directory HLS video is written to.
 	HLSStoragePath = filepath.Join(DataDirectory, "hls")
 

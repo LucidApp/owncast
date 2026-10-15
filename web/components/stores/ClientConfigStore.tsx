@@ -1,5 +1,5 @@
-import { FC, useContext, useEffect, useState } from 'react';
-import { atom, selector, useRecoilState, useSetRecoilState, RecoilEnv } from 'recoil';
+import { FC, useContext, useEffect } from 'react';
+import { atom, useAtom, useSetAtom } from 'jotai';
 import { useMachine } from '@xstate/react';
 import { makeEmptyClientConfig, ClientConfig } from '../../interfaces/client-config.model';
 import { ClientConfigServiceContext } from '../../services/client-config-service';
@@ -12,8 +12,10 @@ import appStateModel, {
   AppStateEvent,
   AppStateOptions,
   makeEmptyAppState,
+  metaForSnapshot,
 } from './application-state';
 import { setLocalStorage, getLocalStorage } from '../../utils/localStorage';
+import { getDisplayNameFromQuery } from '../../utils/displayNameValidation';
 import {
   ConnectedClientInfoEvent,
   MessageType,
@@ -21,17 +23,48 @@ import {
   NameChangeEvent,
   MessageVisibilityEvent,
   SocketEvent,
-  FediverseEvent,
 } from '../../interfaces/socket-events';
-import { mergeMeta } from '../../utils/helpers';
 import { handleConnectedClientInfoMessage } from './eventhandlers/connected-client-info-handler';
 import { ServerStatusServiceContext } from '../../services/status-service';
 import { handleNameChangeEvent } from './eventhandlers/handleNameChangeEvent';
 import { DisplayableError } from '../../types/displayable-error';
 
-RecoilEnv.RECOIL_DUPLICATE_ATOM_KEY_CHECKING_ENABLED = false;
-
 const SERVER_STATUS_POLL_DURATION = 5000;
+
+// Helper to safely parse hydration data injected into the page by the Owncast
+// server (see ServerRenderedHydration). Read from a mount effect, never during
+// render: the statically-exported HTML was built with empty config/status, so
+// initializing state from this data during hydration makes React's first
+// render differ from the server HTML (React errors #418/#423/#425).
+// Returns both the config and whether parsing succeeded.
+const getInitialConfig = (): { config: ClientConfig; success: boolean } => {
+  if (typeof window !== 'undefined' && (window as any).configHydration) {
+    try {
+      const parsed = JSON.parse((window as any).configHydration);
+      if (parsed) {
+        return { config: parsed, success: true };
+      }
+    } catch (e) {
+      console.error('Error parsing config hydration during init', e);
+    }
+  }
+  return { config: makeEmptyClientConfig(), success: false };
+};
+
+const getInitialStatus = (): { status: ServerStatus; success: boolean } => {
+  if (typeof window !== 'undefined' && (window as any).statusHydration) {
+    try {
+      const parsed = JSON.parse((window as any).statusHydration);
+      if (parsed) {
+        return { status: parsed, success: true };
+      }
+    } catch (e) {
+      console.error('Error parsing status hydration during init', e);
+    }
+  }
+  return { status: makeEmptyServerStatus(), success: false };
+};
+
 const ACCESS_TOKEN_KEY = 'accessToken';
 
 let serverStatusRefreshPoll: ReturnType<typeof setInterval>;
@@ -42,80 +75,55 @@ const serverConnectivityError = `Cannot connect to the Owncast service. Please c
 
 // Server status is what gets updated such as viewer count, durations,
 // stream title, online/offline state, etc.
-export const serverStatusState = atom<ServerStatus>({
-  key: 'serverStatusState',
-  default: makeEmptyServerStatus(),
-});
+// Starts empty to match the statically-exported HTML; hydration data and API
+// polls fill it in after mount.
+export const serverStatusState = atom<ServerStatus>(makeEmptyServerStatus());
 
 // The config that comes from the API.
-export const clientConfigStateAtom = atom({
-  key: 'clientConfigState',
-  default: makeEmptyClientConfig(),
-});
+// Starts empty to match the statically-exported HTML; hydration data or the
+// API fills it in after mount.
+export const clientConfigStateAtom = atom(makeEmptyClientConfig());
 
-export const accessTokenAtom = atom<string>({
-  key: 'accessTokenAtom',
-  default: null,
-});
+// Whether the client config has been populated, via hydration or the API.
+// Consumers that must not act on default config values (like the player,
+// whose video.js options are init-only) gate on this.
+export const isClientConfigLoadedAtom = atom<boolean>(false);
 
-export const currentUserAtom = atom<CurrentUser>({
-  key: 'currentUserAtom',
-  default: null,
-});
+// The `null as T` casts below matter: this project compiles without
+// strictNullChecks, so a bare null would match jotai's read-function
+// overload and produce a read-only atom instead of a writable one.
+export const accessTokenAtom = atom<string>(null as string);
 
-export const chatMessagesAtom = atom<ChatMessage[]>({
-  key: 'chatMessages',
-  default: [] as ChatMessage[],
-});
+export const currentUserAtom = atom<CurrentUser>(null as CurrentUser);
 
-export const chatAuthenticatedAtom = atom<boolean>({
-  key: 'chatAuthenticatedAtom',
-  default: false,
-});
+export const chatMessagesAtom = atom<ChatMessage[]>([]);
 
-export const websocketServiceAtom = atom<WebsocketService>({
-  key: 'websocketServiceAtom',
-  default: null,
-  dangerouslyAllowMutability: true,
-});
+export const chatAuthenticatedAtom = atom<boolean>(false);
 
-export const appStateAtom = atom<AppStateOptions>({
-  key: 'appState',
-  default: makeEmptyAppState(),
-});
+// Stores chat input draft to preserve text across mobile/desktop mode switches
+export const chatInputDraftAtom = atom<string>('');
 
-export const isMobileAtom = atom<boolean | undefined>({
-  key: 'isMobileAtom',
-  default: undefined,
-});
+export const websocketServiceAtom = atom<WebsocketService>(null as WebsocketService);
 
-export const isVideoPlayingAtom = atom<boolean>({
-  key: 'isVideoPlayingAtom',
-  default: false,
-});
+// Starts in the "loading" app state to match the statically-exported HTML;
+// the hydration mount effect in ClientConfigStore transitions it to
+// online/offline immediately after mount.
+export const appStateAtom = atom<AppStateOptions>(makeEmptyAppState());
 
-export const fatalErrorStateAtom = atom<DisplayableError>({
-  key: 'fatalErrorStateAtom',
-  default: null,
-});
+export const isMobileAtom = atom<boolean | undefined>(undefined as boolean | undefined);
 
-export const clockSkewAtom = atom<Number>({
-  key: 'clockSkewAtom',
-  default: 0.0,
-});
+export const isVideoPlayingAtom = atom<boolean>(false);
 
-const removedMessageIdsAtom = atom<string[]>({
-  key: 'removedMessageIds',
-  default: [],
-});
+export const fatalErrorStateAtom = atom<DisplayableError>(null as DisplayableError);
 
-export const isChatAvailableSelector = selector({
-  key: 'isChatAvailableSelector',
-  get: ({ get }) => {
-    const state: AppStateOptions = get(appStateAtom);
-    const accessToken: string = get(accessTokenAtom);
-    return accessToken && state.chatAvailable && !hasWebsocketDisconnected;
-  },
+export const clockSkewAtom = atom<Number>(0.0);
+
+const removedMessageIdsAtom = atom<string[]>([]);
+
+export const isChatAvailableSelector = atom(get => {
+  const state: AppStateOptions = get(appStateAtom);
+  const accessToken: string = get(accessTokenAtom);
+  return Boolean(accessToken && state.chatAvailable && !hasWebsocketDisconnected);
 });
 
 // The requested state of chat in the UI
@@ -126,36 +134,29 @@ export enum ChatState {
   EMBEDDED, // This window is opened at /embed/chat/readwrite/
 }
 
-export const chatStateAtom = atom<ChatState>({
-  key: 'chatState',
-  default: (() => {
+export const chatStateAtom = atom<ChatState>(
+  (() => {
     // XXX Somehow, `window` is undefined here, even though this runs in client
     const window = globalThis;
     return window?.location?.pathname === '/embed/chat/readwrite/'
       ? ChatState.EMBEDDED
       : ChatState.VISIBLE;
   })(),
-});
+);
 
 // We display in an "online/live" state as long as video is actively playing.
 // Even during the time where technically the server has said it's no longer
 // live, however the last few seconds of video playback is still taking place.
-export const isOnlineSelector = selector({
-  key: 'isOnlineSelector',
-  get: ({ get }) => {
-    const state: AppStateOptions = get(appStateAtom);
-    const isVideoPlaying: boolean = get(isVideoPlayingAtom);
-    return state.videoAvailable || isVideoPlaying;
-  },
+export const isOnlineSelector = atom(get => {
+  const state: AppStateOptions = get(appStateAtom);
+  const isVideoPlaying: boolean = get(isVideoPlayingAtom);
+  return state.videoAvailable || isVideoPlaying;
 });
 
-export const visibleChatMessagesSelector = selector<ChatMessage[]>({
-  key: 'visibleChatMessagesSelector',
-  get: ({ get }) => {
-    const messages: ChatMessage[] = get(chatMessagesAtom);
-    const removedIds: string[] = get(removedMessageIdsAtom);
-    return messages.filter(message => !removedIds.includes(message.id));
-  },
+export const visibleChatMessagesSelector = atom<ChatMessage[]>(get => {
+  const messages: ChatMessage[] = get(chatMessagesAtom);
+  const removedIds: string[] = get(removedMessageIdsAtom);
+  return messages.filter(message => !removedIds.includes(message.id));
 });
 
 export const ClientConfigStore: FC = () => {
@@ -164,18 +165,18 @@ export const ClientConfigStore: FC = () => {
   const ServerStatusService = useContext(ServerStatusServiceContext);
 
   const [appState, appStateSend, appStateService] = useMachine(appStateModel);
-  const [currentUser, setCurrentUser] = useRecoilState(currentUserAtom);
-  const setChatAuthenticated = useSetRecoilState<boolean>(chatAuthenticatedAtom);
-  const [clientConfig, setClientConfig] = useRecoilState<ClientConfig>(clientConfigStateAtom);
-  const setServerStatus = useSetRecoilState<ServerStatus>(serverStatusState);
-  const setClockSkew = useSetRecoilState<Number>(clockSkewAtom);
-  const setChatMessages = useSetRecoilState<SocketEvent[]>(chatMessagesAtom);
-  const [accessToken, setAccessToken] = useRecoilState<string>(accessTokenAtom);
-  const setAppState = useSetRecoilState<AppStateOptions>(appStateAtom);
-  const setGlobalFatalErrorMessage = useSetRecoilState<DisplayableError>(fatalErrorStateAtom);
-  const setWebsocketService = useSetRecoilState<WebsocketService>(websocketServiceAtom);
-  const setHiddenMessageIds = useSetRecoilState<string[]>(removedMessageIdsAtom);
-  const [hasLoadedConfig, setHasLoadedConfig] = useState(false);
+  const [currentUser, setCurrentUser] = useAtom(currentUserAtom);
+  const setChatAuthenticated = useSetAtom(chatAuthenticatedAtom);
+  const [clientConfig, setClientConfig] = useAtom(clientConfigStateAtom);
+  const setServerStatus = useSetAtom(serverStatusState);
+  const setClockSkew = useSetAtom(clockSkewAtom);
+  const setChatMessages = useSetAtom(chatMessagesAtom);
+  const [accessToken, setAccessToken] = useAtom(accessTokenAtom);
+  const setAppState = useSetAtom(appStateAtom);
+  const setGlobalFatalErrorMessage = useSetAtom(fatalErrorStateAtom);
+  const setWebsocketService = useSetAtom(websocketServiceAtom);
+  const setHiddenMessageIds = useSetAtom(removedMessageIdsAtom);
+  const [hasLoadedConfig, setHasLoadedConfig] = useAtom(isClientConfigLoadedAtom);
 
   let ws: WebsocketService;
 
@@ -186,8 +187,8 @@ export const ClientConfigStore: FC = () => {
     });
   };
   const sendEvent = (events: string[]) => {
-    // console.debug('---- sending event:', event);
-    appStateSend(events);
+    // xstate v5 sends single event objects, so fan out the batch.
+    events.forEach(event => appStateSend({ type: event }));
   };
 
   const handleStatusChange = (status: ServerStatus) => {
@@ -204,7 +205,7 @@ export const ClientConfigStore: FC = () => {
 
     if (status.online && appState.matches('ready')) {
       sendEvent([AppStateEvent.Online]);
-    } else if (!status.online && !appState.matches('ready.offline')) {
+    } else if (!status.online && !appState.matches({ ready: 'offline' })) {
       sendEvent([AppStateEvent.Offline]);
     }
   };
@@ -263,6 +264,7 @@ export const ClientConfigStore: FC = () => {
       });
       setAccessToken(newAccessToken);
       setLocalStorage(ACCESS_TOKEN_KEY, newAccessToken);
+      await updateClientConfig();
     } catch (e) {
       sendEvent([AppStateEvent.Fail]);
       console.error(`ChatService -> registerUser() ERROR: \n${e}`);
@@ -273,6 +275,8 @@ export const ClientConfigStore: FC = () => {
     setLocalStorage(ACCESS_TOKEN_KEY, '');
     setAccessToken(null);
     ws?.shutdown();
+    setWebsocketService(null);
+    ws = null;
     handleUserRegistration();
   };
 
@@ -332,13 +336,13 @@ export const ClientConfigStore: FC = () => {
         setChatMessages(currentState => [...currentState, message as ChatEvent]);
         break;
       case MessageType.FEDIVERSE_ENGAGEMENT_FOLLOW:
-        setChatMessages(currentState => [...currentState, message as FediverseEvent]);
+        setChatMessages(currentState => [...currentState, message as unknown as ChatMessage]);
         break;
       case MessageType.FEDIVERSE_ENGAGEMENT_LIKE:
-        setChatMessages(currentState => [...currentState, message as FediverseEvent]);
+        setChatMessages(currentState => [...currentState, message as unknown as ChatMessage]);
         break;
       case MessageType.FEDIVERSE_ENGAGEMENT_REPOST:
-        setChatMessages(currentState => [...currentState, message as FediverseEvent]);
+        setChatMessages(currentState => [...currentState, message as unknown as ChatMessage]);
         break;
       case MessageType.VISIBILITY_UPDATE:
         handleMessageVisibilityChange(message as MessageVisibilityEvent);
@@ -388,37 +392,46 @@ export const ClientConfigStore: FC = () => {
     }
   };
 
-  // Read the config and status on initial load from a JSON string that lives
-  // in window. This is placed there server-side and allows for fast initial
-  // load times because we don't have to wait for the API calls to complete.
+  // Apply the server-injected hydration data (window.configHydration /
+  // window.statusHydration) after mount. This fills in real config and
+  // status without waiting on an API round trip, while keeping React's
+  // hydration pass identical to the statically-exported HTML.
   useEffect(() => {
-    try {
-      if ((window as any).configHydration) {
-        const config = JSON.parse((window as any).configHydration);
-        setClientConfig(config);
-        setHasLoadedConfig(true);
-      }
-    } catch (e) {
-      console.error('Error parsing config hydration', e);
+    const { config, success: hasHydratedConfig } = getInitialConfig();
+    const { status, success: hasHydratedStatus } = getInitialStatus();
+
+    if (hasHydratedConfig) {
+      setClientConfig(config);
+      setHasLoadedConfig(true);
+    } else {
+      updateClientConfig();
     }
 
-    try {
-      if ((window as any).statusHydration) {
-        const status = JSON.parse((window as any).statusHydration);
-        setServerStatus(status);
-        handleStatusChange(status);
+    // If the URL includes a ?displayname=xyz query param, use it as the
+    // proposed display name when registering a new chat user (the server may
+    // sanitize or override it). It has no effect if the visitor has
+    // previously registered (an access token is already saved).
+    handleUserRegistration(getDisplayNameFromQuery(window.location.search));
+
+    if (hasHydratedStatus) {
+      handleStatusChange(status);
+      setServerStatus(status);
+      if (status.serverTime) {
+        const clockSkew = new Date(status.serverTime).getTime() - Date.now();
+        setClockSkew(clockSkew);
       }
-    } catch (e) {
-      console.error('error parsing status hydration', e);
+    } else {
+      updateServerStatus();
     }
 
-    try {
-      if ((window as any).configHydration && (window as any).statusHydration) {
-        sendEvent([AppStateEvent.Loaded]);
-      }
-    } catch (e) {
-      console.error('error sending loaded event', e);
-    }
+    clearInterval(serverStatusRefreshPoll);
+    serverStatusRefreshPoll = setInterval(() => {
+      updateServerStatus();
+    }, SERVER_STATUS_POLL_DURATION);
+
+    return () => {
+      clearInterval(serverStatusRefreshPoll);
+    };
   }, []);
 
   useEffect(() => {
@@ -442,38 +455,23 @@ export const ClientConfigStore: FC = () => {
   }, [hasLoadedConfig, accessToken]);
 
   useEffect(() => {
-    if (!(window as any).configHydration) {
-      updateClientConfig();
-    }
-    handleUserRegistration();
-    if (!(window as any).statusHydration) {
-      updateServerStatus();
-    }
-    clearInterval(serverStatusRefreshPoll);
-    serverStatusRefreshPoll = setInterval(() => {
-      updateServerStatus();
-    }, SERVER_STATUS_POLL_DURATION);
-
-    return () => {
-      clearInterval(serverStatusRefreshPoll);
-    };
-  }, []);
-
-  useEffect(() => {
     if (accessToken) {
       getChatHistory();
     }
   }, [accessToken]);
 
   useEffect(() => {
-    appStateService.onTransition(state => {
-      const metadata = mergeMeta(state.meta) as AppStateOptions;
-
-      // console.debug('--- APP STATE: ', state.value);
-      // console.debug('--- APP META: ', metadata);
-
-      setAppState(metadata);
-    });
+    const applySnapshot = state => {
+      setAppState(metaForSnapshot(state));
+    };
+    const subscription = appStateService.subscribe(applySnapshot);
+    // Sync the current snapshot too: the hydration effect above runs first
+    // and can transition the machine (e.g. straight to online) before this
+    // subscription attaches. xstate v4's onTransition also fired on every
+    // event, transition or not, which papered over that ordering; v5's
+    // subscribe only fires on real transitions.
+    applySnapshot(appStateService.getSnapshot());
+    return () => subscription.unsubscribe();
   }, []);
 
   return null;

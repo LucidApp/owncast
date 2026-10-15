@@ -1,4 +1,4 @@
-@import '../../../../styles/mixins';
+@use '../../../../styles/mixins' as *;
 
 .followers {
   width: 100%;
@@ -9,32 +9,18 @@
   .followerRow {
     display: grid;
     gap: 16px 0;
-    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
     grid-auto-rows: min-content;
+
+    > * {
+      min-width: 0;
+    }
   }
 
   @include screen(mobile) {
     .followerRow {
       display: block;
       justify-content: center;
-    }
-  }
-
-  @media (640px <= width < 960px) {
-    .followerRow {
-      grid-template-columns: repeat(2, 1fr);
-    }
-  }
-
-  @media (960px <= width < 1280px) {
-    .followerRow {
-      grid-template-columns: repeat(3, 1fr);
-    }
-  }
-
-  @media (width >= 1280px) {
-    .followerRow {
-      grid-template-columns: repeat(4, 1fr);
     }
   }
 }

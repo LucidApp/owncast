@@ -5,9 +5,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/owncast/owncast/logging"
-	"github.com/sirupsen/logrus"
 	log "github.com/sirupsen/logrus"
+
+	"github.com/owncast/owncast/logging"
 )
 
 // GetLogs will return all logs.
@@ -49,7 +49,7 @@ type logsResponse struct {
 	Level   string    `json:"level"`
 }
 
-func fromEntry(e *logrus.Entry) logsResponse {
+func fromEntry(e *log.Entry) logsResponse {
 	return logsResponse{
 		Message: e.Message,
 		Level:   e.Level.String(),

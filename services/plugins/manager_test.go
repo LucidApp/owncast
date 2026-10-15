@@ -1,0 +1,1045 @@
+package plugins
+
+import (
+	"archive/zip"
+	"bytes"
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	log "github.com/sirupsen/logrus"
+)
+
+// TestSnapshot_OmitsStrikeDisabledPlugins is the C4 regression: a plugin the
+// strike system auto-disabled must drop out of Snapshot, which every dispatch
+// and serve path reads from, so it stops doing all work (not just filtering).
+func TestSnapshot_OmitsStrikeDisabledPlugins(t *testing.T) {
+	m := NewManager(t.TempDir(), &HostEnv{})
+	active := &Loaded{Manifest: &Manifest{Slug: "active"}}
+	struck := &Loaded{Manifest: &Manifest{Slug: "struck"}}
+	struck.disabled.Store(true)
+	m.loaded["active"] = active
+	m.loaded["struck"] = struck
+
+	got := m.Snapshot()
+	if len(got) != 1 || got[0].Manifest.Slug != "active" {
+		var slugs []string
+		for _, l := range got {
+			slugs = append(slugs, l.Manifest.Slug)
+		}
+		t.Fatalf("Snapshot should omit strike-disabled plugins; got %v", slugs)
+	}
+}
+
+// makePluginFiles drops a sidecar wasm + manifest pair into dir. The manifest
+// name is what the manager keys discovered/enabled state by.
+func makePluginFiles(t *testing.T, dir, name string, wasmBytes []byte) {
+	t.Helper()
+	// Slug and permissions must agree with what the bundled example's
+	// register() returns — the host enforces manifest/runtime agreement on
+	// those at load time. Version is informational and not compared.
+	manifest := map[string]any{
+		"api":         "1",
+		"name":        name,
+		"version":     "0.1.0",
+		"description": name + " for tests",
+		"permissions": []string{},
+	}
+	mb, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name+".manifest.json"), mb, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name+".wasm"), wasmBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestManager_DiscoversWithoutLoading(t *testing.T) {
+	wasmPath := findExampleWasm(t)
+	wasmBytes, err := os.ReadFile(wasmPath)
+	if err != nil {
+		t.Fatalf("read example wasm: %v", err)
+	}
+
+	dir := t.TempDir()
+	makePluginFiles(t, dir, "hello-world", wasmBytes)
+
+	mgr := NewManager(dir, &HostEnv{})
+	if err := mgr.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer mgr.Stop(context.Background())
+
+	entries := mgr.List()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 discovered, got %d", len(entries))
+	}
+	if entries[0].Slug != "hello-world" {
+		t.Errorf("slug: got %q want hello-world", entries[0].Slug)
+	}
+	if entries[0].Loaded {
+		t.Error("plugin should not be loaded — admin never enabled it")
+	}
+	if entries[0].Enabled {
+		t.Error("plugin should not be enabled — admin never enabled it")
+	}
+	if len(mgr.Snapshot()) != 0 {
+		t.Errorf("snapshot should be empty for un-enabled plugin, got %d", len(mgr.Snapshot()))
+	}
+}
+
+func TestManager_EnableLoadsAndPersists(t *testing.T) {
+	wasmPath := findExampleWasm(t)
+	wasmBytes, _ := os.ReadFile(wasmPath)
+
+	dir := t.TempDir()
+	makePluginFiles(t, dir, "hello-world", wasmBytes)
+
+	ctx := context.Background()
+	mgr := NewManager(dir, &HostEnv{})
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	if err := mgr.Enable(ctx, "hello-world"); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	if len(mgr.Snapshot()) != 1 {
+		t.Errorf("snapshot count after enable: got %d want 1", len(mgr.Snapshot()))
+	}
+
+	// Persistence: stop, start a fresh manager, plugin should auto-load.
+	mgr.Stop(ctx)
+
+	mgr2 := NewManager(dir, &HostEnv{})
+	if err := mgr2.Start(ctx); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	defer mgr2.Stop(ctx)
+
+	if len(mgr2.Snapshot()) != 1 {
+		t.Errorf("snapshot count after restart: got %d want 1 (enabled set should persist)",
+			len(mgr2.Snapshot()))
+	}
+}
+
+func TestManager_DisableUnloadsButKeepsDiscovered(t *testing.T) {
+	wasmPath := findExampleWasm(t)
+	wasmBytes, _ := os.ReadFile(wasmPath)
+
+	dir := t.TempDir()
+	makePluginFiles(t, dir, "hello-world", wasmBytes)
+
+	ctx := context.Background()
+	mgr := NewManager(dir, &HostEnv{})
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer mgr.Stop(ctx)
+
+	if err := mgr.Enable(ctx, "hello-world"); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	if err := mgr.Disable(ctx, "hello-world"); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	if len(mgr.Snapshot()) != 0 {
+		t.Errorf("snapshot after disable: got %d want 0", len(mgr.Snapshot()))
+	}
+	entries := mgr.List()
+	if len(entries) != 1 {
+		t.Errorf("discovered list after disable: got %d want 1", len(entries))
+	}
+	if entries[0].Enabled {
+		t.Error("entry should not be marked enabled after disable")
+	}
+}
+
+func TestManager_ScanRemovesDeletedFiles(t *testing.T) {
+	wasmPath := findExampleWasm(t)
+	wasmBytes, _ := os.ReadFile(wasmPath)
+
+	dir := t.TempDir()
+	makePluginFiles(t, dir, "hello-world", wasmBytes)
+
+	ctx := context.Background()
+	mgr := NewManager(dir, &HostEnv{})
+	mgr.scanInterval = 20 * time.Millisecond
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer mgr.Stop(ctx)
+
+	if len(mgr.List()) != 1 {
+		t.Fatalf("setup: expected 1 discovered, got %d", len(mgr.List()))
+	}
+
+	// Delete both files; the next scan should drop the entry.
+	if err := os.Remove(filepath.Join(dir, "hello-world.wasm")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, "hello-world.manifest.json")); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(mgr.List()) == 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Errorf("expected scan to drop deleted plugin within 2s, still have %d", len(mgr.List()))
+}
+
+func TestManager_ScanIgnoresUploadStagingPackages(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+	mgr := NewManager(dir, &HostEnv{})
+	manifest := func(slug string) []byte {
+		t.Helper()
+		data, err := json.Marshal(map[string]any{
+			"api":         "1",
+			"name":        slug,
+			"slug":        slug,
+			"version":     "0.1.0",
+			"permissions": []string{},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+
+	installed := buildJSPackageBytes(t,
+		manifest("installed"),
+		[]byte(`const { definePlugin } = require("@owncast/plugin-sdk");
+module.exports = definePlugin({ onChatMessage(msg) {} });`))
+	if err := os.WriteFile(filepath.Join(dir, "installed.ocpkg"), installed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer mgr.Stop(ctx)
+
+	staging := buildJSPackageBytes(t,
+		manifest("not-installed"),
+		[]byte(`const { definePlugin } = require("@owncast/plugin-sdk");
+module.exports = definePlugin({ onChatMessage(msg) {} });`))
+	if err := os.WriteFile(filepath.Join(dir, ".upload-not-installed.ocpkg"), staging, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := mgr.scan(ctx); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if got := len(mgr.List()); got != 1 {
+		t.Fatalf("staging package was discovered: got %d entries, want 1", got)
+	}
+	if got := mgr.List()[0].Slug; got != "installed" {
+		t.Fatalf("discovered staging package %q, want installed", got)
+	}
+}
+
+func TestManager_EnableUnknownPluginErrors(t *testing.T) {
+	dir := t.TempDir()
+	mgr := NewManager(dir, &HostEnv{})
+	if err := mgr.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer mgr.Stop(context.Background())
+
+	err := mgr.Enable(context.Background(), "does-not-exist")
+	if err == nil {
+		t.Error("expected error enabling unknown plugin")
+	}
+}
+
+// rewriteManifestPerms updates the sidecar manifest's permissions field
+// without touching name or version, simulating an author dropping a new
+// .ocpkg whose manifest declares additional permissions.
+func rewriteManifestPerms(t *testing.T, dir, name string, perms []string) {
+	t.Helper()
+	manifest := map[string]any{
+		"api":         "1",
+		"name":        name,
+		"version":     "0.1.0",
+		"description": name + " for tests",
+		"permissions": perms,
+	}
+	mb, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name+".manifest.json"), mb, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPendingPermissions(t *testing.T) {
+	cases := []struct {
+		name     string
+		manifest []string
+		approved []string
+		want     []string
+	}{
+		{"empty manifest", nil, []string{"a"}, nil},
+		{"all approved", []string{"a", "b"}, []string{"a", "b"}, nil},
+		{"new perm pending", []string{"a", "b"}, []string{"a"}, []string{"b"}},
+		{"approved superset", []string{"a"}, []string{"a", "b"}, nil},
+		{"no approval baseline", []string{"a", "b"}, nil, []string{"a", "b"}},
+		{"unsorted manifest order", []string{"c", "a"}, []string{"a"}, []string{"c"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := pendingPermissions(tc.manifest, tc.approved)
+			if !stringSliceEqual(got, tc.want) {
+				t.Errorf("pendingPermissions(%v, %v) = %v, want %v",
+					tc.manifest, tc.approved, got, tc.want)
+			}
+		})
+	}
+}
+
+func stringSliceEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestManager_EnableCapturesApprovalBaseline(t *testing.T) {
+	wasmPath := findExampleWasm(t)
+	wasmBytes, _ := os.ReadFile(wasmPath)
+	dir := t.TempDir()
+	makePluginFiles(t, dir, "hello-world", wasmBytes)
+
+	ctx := context.Background()
+	mgr := NewManager(dir, &HostEnv{})
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer mgr.Stop(ctx)
+
+	if err := mgr.Enable(ctx, "hello-world"); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+
+	// The on-disk .enabled.json should now contain an empty approved-perm
+	// list for hello-world (the bundled manifest has no permissions).
+	raw, err := os.ReadFile(filepath.Join(dir, ".enabled.json"))
+	if err != nil {
+		t.Fatalf("read enabled file: %v", err)
+	}
+	var f enabledFileContents
+	if err := json.Unmarshal(raw, &f); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, ok := f.ApprovedPermissions["hello-world"]; !ok {
+		t.Errorf("expected approved perm entry for hello-world after enable; got %v", f.ApprovedPermissions)
+	}
+}
+
+func TestManager_PermExpansionAutoDisables(t *testing.T) {
+	wasmPath := findExampleWasm(t)
+	wasmBytes, _ := os.ReadFile(wasmPath)
+	dir := t.TempDir()
+	makePluginFiles(t, dir, "hello-world", wasmBytes)
+
+	ctx := context.Background()
+	mgr := NewManager(dir, &HostEnv{})
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if err := mgr.Enable(ctx, "hello-world"); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	mgr.Stop(ctx)
+
+	// Author updates the manifest on disk to declare a permission the
+	// admin never approved. The wasm itself stays put (so AgreesWith
+	// still passes: empty runtime perms is a subset of any manifest set).
+	rewriteManifestPerms(t, dir, "hello-world", []string{"chat.send"})
+
+	mgr2 := NewManager(dir, &HostEnv{})
+	if err := mgr2.Start(ctx); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	defer mgr2.Stop(ctx)
+
+	entries := mgr2.List()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 discovered, got %d", len(entries))
+	}
+	entry := entries[0]
+	if !entry.Enabled {
+		t.Error("admin intent should survive: Enabled=true")
+	}
+	if entry.Loaded {
+		t.Error("plugin must not load while permissions are pending approval")
+	}
+	if !stringSliceEqual(entry.PendingPermissions, []string{"chat.send"}) {
+		t.Errorf("PendingPermissions = %v, want [chat.send]", entry.PendingPermissions)
+	}
+	if len(mgr2.Snapshot()) != 0 {
+		t.Errorf("snapshot must be empty: plugin is pending approval, got %d loaded", len(mgr2.Snapshot()))
+	}
+}
+
+func TestManager_ReEnableApprovesAndLoads(t *testing.T) {
+	wasmPath := findExampleWasm(t)
+	wasmBytes, _ := os.ReadFile(wasmPath)
+	dir := t.TempDir()
+	makePluginFiles(t, dir, "hello-world", wasmBytes)
+
+	ctx := context.Background()
+	mgr := NewManager(dir, &HostEnv{})
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if err := mgr.Enable(ctx, "hello-world"); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	mgr.Stop(ctx)
+
+	rewriteManifestPerms(t, dir, "hello-world", []string{"chat.send"})
+
+	mgr2 := NewManager(dir, &HostEnv{})
+	if err := mgr2.Start(ctx); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	defer mgr2.Stop(ctx)
+
+	// Sanity: still pending.
+	if entries := mgr2.List(); entries[0].Loaded {
+		t.Fatal("plugin should not be loaded before re-enable")
+	}
+
+	// Admin re-enables; this captures the expanded perm set as the new
+	// approved baseline, clears PendingPermissions, and loads the plugin.
+	if err := mgr2.Enable(ctx, "hello-world"); err != nil {
+		t.Fatalf("re-enable: %v", err)
+	}
+	entries := mgr2.List()
+	if len(entries[0].PendingPermissions) != 0 {
+		t.Errorf("PendingPermissions should be cleared after re-enable, got %v",
+			entries[0].PendingPermissions)
+	}
+	if !entries[0].Loaded {
+		t.Error("plugin should be loaded after re-enable")
+	}
+}
+
+func TestManager_ExistingInstallGetsApprovalBaseline(t *testing.T) {
+	// An installation that predates the approved-permissions field: the
+	// enabled file lists the plugin but has no approved perms map. On
+	// next Start, the manager should silently capture the current
+	// manifest perms as the baseline rather than treat them as pending.
+	wasmPath := findExampleWasm(t)
+	wasmBytes, _ := os.ReadFile(wasmPath)
+	dir := t.TempDir()
+	rewriteManifestPerms(t, dir, "hello-world", []string{"chat.send"})
+	if err := os.WriteFile(filepath.Join(dir, "hello-world.wasm"), wasmBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Legacy enabled.json: enabled set only, no approvals.
+	legacy := []byte(`{"enabled":["hello-world"]}`)
+	if err := os.WriteFile(filepath.Join(dir, ".enabled.json"), legacy, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	mgr := NewManager(dir, &HostEnv{})
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer mgr.Stop(ctx)
+
+	entries := mgr.List()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 discovered, got %d", len(entries))
+	}
+	if len(entries[0].PendingPermissions) != 0 {
+		t.Errorf("existing install should not flag any pending perms, got %v",
+			entries[0].PendingPermissions)
+	}
+	if !entries[0].Loaded {
+		t.Error("existing install should load on next Start without re-approval")
+	}
+}
+
+// buildPackageBytes builds an in-memory .ocpkg with the given manifest and
+// wasm bytes (and optional assets) using the same on-disk layout the
+// scan path expects.
+func buildPackageBytes(t *testing.T, manifest []byte, wasm []byte, assets map[string][]byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	if manifest != nil {
+		w, err := zw.Create(pkgManifestFilename)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write(manifest); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if wasm != nil {
+		w, err := zw.Create(pkgWasmFilename)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write(wasm); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, data := range assets {
+		w, err := zw.Create(pkgAssetsPrefix + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write(data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func TestManager_Install_WritesPackageAndDiscovers(t *testing.T) {
+	wasmPath := findExampleWasm(t)
+	wasmBytes, _ := os.ReadFile(wasmPath)
+
+	dir := t.TempDir()
+	mgr := NewManager(dir, &HostEnv{})
+	if err := mgr.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer mgr.Stop(context.Background())
+
+	pkg := buildPackageBytes(t, validManifestBytes(), wasmBytes, nil)
+	entry, err := mgr.Install(context.Background(), pkg)
+	if err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if entry.Slug != "hello-world" {
+		t.Errorf("entry slug: got %q want hello-world", entry.Slug)
+	}
+	expectedPath := filepath.Join(dir, "hello-world.ocpkg")
+	if _, err := os.Stat(expectedPath); err != nil {
+		t.Errorf("expected file %s to exist after install: %v", expectedPath, err)
+	}
+	if len(mgr.List()) != 1 {
+		t.Errorf("install should leave one discovered plugin, got %d", len(mgr.List()))
+	}
+}
+
+func TestManager_InstallUploaded_RejectsExistingSlug(t *testing.T) {
+	wasmPath := findExampleWasm(t)
+	wasmBytes, err := os.ReadFile(wasmPath)
+	if err != nil {
+		t.Fatalf("read example wasm: %v", err)
+	}
+
+	ctx := context.Background()
+	mgr := NewManager(t.TempDir(), &HostEnv{})
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer mgr.Stop(ctx)
+
+	pkg := buildPackageBytes(t, validManifestBytes(), wasmBytes, nil)
+	if _, err := mgr.Install(ctx, pkg); err != nil {
+		t.Fatalf("install first plugin: %v", err)
+	}
+	if _, err := mgr.InstallUploaded(ctx, pkg); err == nil || !strings.Contains(err.Error(), `slug "hello-world"`) {
+		t.Fatalf("duplicate upload error = %v, want slug-specific rejection", err)
+	}
+}
+
+func TestManager_Install_RejectsReplacingLoosePlugin(t *testing.T) {
+	wasmPath := findExampleWasm(t)
+	wasmBytes, err := os.ReadFile(wasmPath)
+	if err != nil {
+		t.Fatalf("read example wasm: %v", err)
+	}
+
+	dir := t.TempDir()
+	loosePath := filepath.Join(dir, "local-copy.wasm")
+	if err := os.WriteFile(loosePath, wasmBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "local-copy.manifest.json"), validManifestBytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	mgr := NewManager(dir, &HostEnv{})
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer mgr.Stop(ctx)
+
+	pkg := buildPackageBytes(t, validManifestBytes(), wasmBytes, nil)
+	_, err = mgr.Install(ctx, pkg)
+	if err == nil || !strings.Contains(err.Error(), `slug "hello-world"`) ||
+		!strings.Contains(err.Error(), "loose plugin") ||
+		!strings.Contains(err.Error(), loosePath) {
+		t.Fatalf("install error = %v, want loose-plugin conflict", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "hello-world.ocpkg")); !os.IsNotExist(err) {
+		t.Fatalf("conflicting package was written, stat error = %v", err)
+	}
+	entries := mgr.List()
+	if len(entries) != 1 || entries[0].Path != loosePath {
+		t.Fatalf("discovered entries = %+v, want original loose plugin", entries)
+	}
+}
+
+func TestManager_ScanDisablesLaterPluginWithDuplicateSlug(t *testing.T) {
+	dir := t.TempDir()
+	manifest := func(name string) []byte {
+		t.Helper()
+		data, err := json.Marshal(map[string]any{
+			"api":     "1",
+			"name":    name,
+			"slug":    "shared-slug",
+			"version": "0.1.0",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	if err := os.WriteFile(filepath.Join(dir, "first.ocpkg"), buildPackageBytes(t, manifest("First plugin"), nil, nil), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "second.ocpkg"), buildPackageBytes(t, manifest("Second plugin"), nil, nil), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	previousLogOutput := log.StandardLogger().Out
+	var logOutput bytes.Buffer
+	log.SetOutput(&logOutput)
+	t.Cleanup(func() { log.SetOutput(previousLogOutput) })
+
+	mgr := NewManager(dir, &HostEnv{})
+	if err := mgr.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer mgr.Stop(context.Background())
+
+	entries := mgr.List()
+	if len(entries) != 1 {
+		t.Fatalf("discovered plugins = %d, want 1", len(entries))
+	}
+	if entries[0].DisplayName != "First plugin" || entries[0].Path != filepath.Join(dir, "first.ocpkg") {
+		t.Errorf("duplicate scan kept %+v, want first package", entries[0])
+	}
+	if output := logOutput.String(); !strings.Contains(output, "Second plugin") ||
+		!strings.Contains(output, "shared-slug") ||
+		!strings.Contains(output, "first.ocpkg") {
+		t.Errorf("duplicate plugin log = %q", output)
+	}
+}
+
+func TestManager_Install_RejectsEmptyUpload(t *testing.T) {
+	mgr := NewManager(t.TempDir(), &HostEnv{})
+	_, err := mgr.Install(context.Background(), nil)
+	if err == nil {
+		t.Fatal("expected error for empty upload")
+	}
+}
+
+func TestManager_Install_RejectsOversizedUpload(t *testing.T) {
+	mgr := NewManager(t.TempDir(), &HostEnv{})
+	oversized := make([]byte, MaxUploadBytes+1)
+	_, err := mgr.Install(context.Background(), oversized)
+	if err == nil {
+		t.Fatal("expected error for oversized upload")
+	}
+	if !strings.Contains(err.Error(), "cap") {
+		t.Errorf("error should mention the cap: got %v", err)
+	}
+}
+
+func TestManager_Install_RejectsNonOcpkg(t *testing.T) {
+	mgr := NewManager(t.TempDir(), &HostEnv{})
+	_, err := mgr.Install(context.Background(), []byte("not a zip"))
+	if err == nil {
+		t.Fatal("expected error for garbage upload")
+	}
+}
+
+func TestManager_Install_RejectsMissingManifest(t *testing.T) {
+	wasmPath := findExampleWasm(t)
+	wasmBytes, _ := os.ReadFile(wasmPath)
+
+	mgr := NewManager(t.TempDir(), &HostEnv{})
+	pkg := buildPackageBytes(t, nil, wasmBytes, nil)
+	_, err := mgr.Install(context.Background(), pkg)
+	if err == nil {
+		t.Fatal("expected error for package missing manifest")
+	}
+	if !strings.Contains(err.Error(), "manifest") {
+		t.Errorf("error should mention manifest: got %v", err)
+	}
+}
+
+func TestManager_Install_RejectsUnloadablePackage(t *testing.T) {
+	wasmPath := findExampleWasm(t)
+	wasmBytes, _ := os.ReadFile(wasmPath)
+
+	mgr := NewManager(t.TempDir(), &HostEnv{})
+	// Package the wasm under a slug it does not bake into register() so the
+	// manifest/runtime agreement check fails (the wasm reports "hello-world").
+	pkg := buildPackageBytes(t, []byte(`{
+		"api": "1",
+		"name": "Ghost Plugin",
+		"slug": "ghost-plugin",
+		"version": "9.9.9",
+		"description": "mismatched manifest/runtime for install preflight",
+		"permissions": []
+	}`), wasmBytes, nil)
+	_, err := mgr.Install(context.Background(), pkg)
+	if err == nil {
+		t.Fatal("expected error for unloadable package")
+	}
+	if !strings.Contains(err.Error(), "manifest/runtime mismatch") {
+		t.Errorf("error should mention manifest/runtime mismatch: got %v", err)
+	}
+	entries := mgr.List()
+	if len(entries) != 0 {
+		t.Fatalf("unloadable package should not be discovered, got %d entries", len(entries))
+	}
+}
+
+func TestManager_Uninstall_DeletesFileAndClearsState(t *testing.T) {
+	wasmPath := findExampleWasm(t)
+	wasmBytes, _ := os.ReadFile(wasmPath)
+	dir := t.TempDir()
+
+	ctx := context.Background()
+	mgr := NewManager(dir, &HostEnv{})
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer mgr.Stop(ctx)
+
+	pkg := buildPackageBytes(t, validManifestBytes(), wasmBytes, nil)
+	if _, err := mgr.Install(ctx, pkg); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if err := mgr.Enable(ctx, "hello-world"); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	if len(mgr.Snapshot()) != 1 {
+		t.Fatalf("expected 1 loaded before uninstall, got %d", len(mgr.Snapshot()))
+	}
+
+	if err := mgr.Uninstall(ctx, "hello-world"); err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	if len(mgr.List()) != 0 {
+		t.Errorf("expected 0 discovered after uninstall, got %d", len(mgr.List()))
+	}
+	if len(mgr.Snapshot()) != 0 {
+		t.Errorf("expected 0 loaded after uninstall, got %d", len(mgr.Snapshot()))
+	}
+	if _, err := os.Stat(filepath.Join(dir, "hello-world.ocpkg")); !os.IsNotExist(err) {
+		t.Errorf("expected .ocpkg file to be removed, stat err = %v", err)
+	}
+
+	// Persistence: the cleared state survives a restart. A fresh manager
+	// should see no enabled set and no approval entry.
+	mgr.Stop(ctx)
+	mgr2 := NewManager(dir, &HostEnv{})
+	if err := mgr2.Start(ctx); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	defer mgr2.Stop(ctx)
+	raw, err := os.ReadFile(filepath.Join(dir, ".enabled.json"))
+	if err == nil {
+		var f enabledFileContents
+		if err := json.Unmarshal(raw, &f); err != nil {
+			t.Fatalf("decode persisted state: %v", err)
+		}
+		if len(f.Enabled) != 0 {
+			t.Errorf("enabled set should be empty after uninstall, got %v", f.Enabled)
+		}
+		if _, ok := f.ApprovedPermissions["hello-world"]; ok {
+			t.Error("approval snapshot should be cleared after uninstall")
+		}
+	}
+}
+
+func TestManager_Uninstall_UnknownPluginErrors(t *testing.T) {
+	mgr := NewManager(t.TempDir(), &HostEnv{})
+	if err := mgr.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer mgr.Stop(context.Background())
+	err := mgr.Uninstall(context.Background(), "nothing-here")
+	if err == nil {
+		t.Fatal("expected error uninstalling unknown plugin")
+	}
+}
+
+func TestManager_Install_UpdatesExistingPlugin(t *testing.T) {
+	wasmPath := findExampleWasm(t)
+	wasmBytes, _ := os.ReadFile(wasmPath)
+
+	dir := t.TempDir()
+	mgr := NewManager(dir, &HostEnv{})
+	if err := mgr.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer mgr.Stop(context.Background())
+
+	// First install: hello-world 0.1.0
+	pkg1 := buildPackageBytes(t, validManifestBytes(), wasmBytes, nil)
+	if _, err := mgr.Install(context.Background(), pkg1); err != nil {
+		t.Fatalf("first install: %v", err)
+	}
+
+	// Second install of the same plugin name with a bumped description.
+	updated := []byte(`{
+		"api": "1",
+		"name": "hello-world",
+		"version": "0.1.0",
+		"description": "updated description",
+		"permissions": []
+	}`)
+	pkg2 := buildPackageBytes(t, updated, wasmBytes, nil)
+	entry, err := mgr.Install(context.Background(), pkg2)
+	if err != nil {
+		t.Fatalf("second install: %v", err)
+	}
+	if entry.Description != "updated description" {
+		t.Errorf("description after update: got %q want %q", entry.Description, "updated description")
+	}
+	if len(mgr.List()) != 1 {
+		t.Errorf("update should not duplicate the entry, got %d", len(mgr.List()))
+	}
+}
+
+// --- registry homepage sidecar ---
+
+const testHomepage = "https://example.com/docs"
+
+// sidecarPath returns the registry-metadata sidecar path the manager
+// writes next to a loose-files plugin in dir.
+func sidecarPath(dir, name string) string {
+	return filepath.Join(dir, name+".registry.json")
+}
+
+// readSidecarHomepage decodes the homepage recorded in a registry
+// sidecar file. The literal filename and JSON key are the on-disk
+// persistence contract the registry install flow depends on.
+func readSidecarHomepage(t *testing.T, path string) string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read sidecar: %v", err)
+	}
+	var meta struct {
+		Homepage string `json:"homepage"`
+	}
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		t.Fatalf("decode sidecar %s: %v", raw, err)
+	}
+	return meta.Homepage
+}
+
+// Discovery only parses the manifest sidecar (never instantiates the
+// wasm), so the homepage tests use junk wasm bytes and run without the
+// SDK example being built.
+func TestManager_SetPluginHomepage_WritesSidecarAndSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	makePluginFiles(t, dir, "hello-world", []byte{0x00})
+
+	ctx := context.Background()
+	mgr := NewManager(dir, &HostEnv{})
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	if err := mgr.SetPluginHomepage("hello-world", testHomepage); err != nil {
+		t.Fatalf("set homepage: %v", err)
+	}
+	if got := readSidecarHomepage(t, sidecarPath(dir, "hello-world")); got != testHomepage {
+		t.Errorf("sidecar homepage = %q, want %q", got, testHomepage)
+	}
+	entries := mgr.List()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 discovered, got %d", len(entries))
+	}
+	if entries[0].Homepage != testHomepage {
+		t.Errorf("List should show the homepage immediately, got %q", entries[0].Homepage)
+	}
+
+	// Restart survival: a fresh manager over the same dir rediscovers
+	// the plugin with the homepage populated from the sidecar.
+	mgr.Stop(ctx)
+	mgr2 := NewManager(dir, &HostEnv{})
+	if err := mgr2.Start(ctx); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	defer mgr2.Stop(ctx)
+	entries = mgr2.List()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 discovered after restart, got %d", len(entries))
+	}
+	if entries[0].Homepage != testHomepage {
+		t.Errorf("homepage should survive a restart via the sidecar, got %q", entries[0].Homepage)
+	}
+}
+
+func TestManager_SetPluginHomepage_RejectsNonHTTPURLs(t *testing.T) {
+	dir := t.TempDir()
+	makePluginFiles(t, dir, "hello-world", []byte{0x00})
+
+	mgr := NewManager(dir, &HostEnv{})
+	if err := mgr.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer mgr.Stop(context.Background())
+
+	// The admin UI renders the homepage as a clickable link, so only
+	// absolute http(s) URLs may be recorded.
+	for _, bad := range []string{"javascript:alert(1)", "/relative", "example.com/no-scheme"} {
+		if err := mgr.SetPluginHomepage("hello-world", bad); err == nil {
+			t.Errorf("SetPluginHomepage(%q) should be rejected", bad)
+		}
+	}
+	if _, err := os.Stat(sidecarPath(dir, "hello-world")); !os.IsNotExist(err) {
+		t.Errorf("rejected homepage must not leave a sidecar, stat err = %v", err)
+	}
+	entries := mgr.List()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 discovered, got %d", len(entries))
+	}
+	if entries[0].Homepage != "" {
+		t.Errorf("rejected homepage must not show in List, got %q", entries[0].Homepage)
+	}
+}
+
+func TestManager_SetPluginHomepage_UnknownSlugErrors(t *testing.T) {
+	mgr := NewManager(t.TempDir(), &HostEnv{})
+	if err := mgr.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer mgr.Stop(context.Background())
+	if err := mgr.SetPluginHomepage("nothing-here", testHomepage); err == nil {
+		t.Fatal("expected error setting homepage for unknown plugin")
+	}
+}
+
+func TestManager_SetPluginHomepage_EmptyRemovesSidecar(t *testing.T) {
+	dir := t.TempDir()
+	makePluginFiles(t, dir, "hello-world", []byte{0x00})
+
+	mgr := NewManager(dir, &HostEnv{})
+	if err := mgr.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer mgr.Stop(context.Background())
+
+	if err := mgr.SetPluginHomepage("hello-world", testHomepage); err != nil {
+		t.Fatalf("set homepage: %v", err)
+	}
+	if err := mgr.SetPluginHomepage("hello-world", ""); err != nil {
+		t.Fatalf("clear homepage: %v", err)
+	}
+	if _, err := os.Stat(sidecarPath(dir, "hello-world")); !os.IsNotExist(err) {
+		t.Errorf("clearing the homepage should remove the sidecar, stat err = %v", err)
+	}
+	entries := mgr.List()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 discovered, got %d", len(entries))
+	}
+	if entries[0].Homepage != "" {
+		t.Errorf("cleared homepage should vanish from List, got %q", entries[0].Homepage)
+	}
+}
+
+func TestManager_Uninstall_RemovesRegistrySidecar(t *testing.T) {
+	dir := t.TempDir()
+	makePluginFiles(t, dir, "hello-world", []byte{0x00})
+
+	ctx := context.Background()
+	mgr := NewManager(dir, &HostEnv{})
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer mgr.Stop(ctx)
+
+	if err := mgr.SetPluginHomepage("hello-world", testHomepage); err != nil {
+		t.Fatalf("set homepage: %v", err)
+	}
+	if err := mgr.Uninstall(ctx, "hello-world"); err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	if _, err := os.Stat(sidecarPath(dir, "hello-world")); !os.IsNotExist(err) {
+		t.Errorf("uninstall should remove the registry sidecar, stat err = %v", err)
+	}
+}
+
+// TestSelfContainedWasmInstanceConfig pins the reserved Extism config keys a
+// hand-authored wasm module reads at runtime. "__slug" is what shared host
+// functions resolve identity by. The packaged manifest is what such a plugin
+// echoes back from register() because there is no SDK to bake a copy into the
+// module. "script" is shared-engine only. The artifact already is the code for
+// a self-contained module.
+func TestSelfContainedWasmInstanceConfig(t *testing.T) {
+	manifestBytes := validManifestBytes()
+	manifest, err := ParseManifest(manifestBytes)
+	if err != nil {
+		t.Fatalf("parse manifest: %v", err)
+	}
+	manifest.Type = RuntimeWasm
+
+	ctx := context.Background()
+	// An exportless module is enough: instantiate only wires config, memory
+	// limits, and host functions. It never calls into the guest.
+	p, release, err := instantiate(ctx, &HostEnv{}, manifest, manifestBytes, emptyWasmModule(), "hello-world")
+	if err != nil {
+		t.Fatalf("instantiate: %v", err)
+	}
+	defer func() { _ = p.Close(ctx) }()
+
+	if release != nil {
+		t.Error("self-contained wasm holds no shared-engine reference, so its release func must be nil")
+	}
+	if got := p.Config[configKeySlug]; got != manifest.Slug {
+		t.Errorf("config[%q] = %q, want %q", configKeySlug, got, manifest.Slug)
+	}
+	if got := p.Config[configKeyManifest]; got != string(manifestBytes) {
+		t.Errorf("config[%q] = %q, want the packaged sidecar bytes %q", configKeyManifest, got, string(manifestBytes))
+	}
+	if got, ok := p.Config[configKeyScript]; ok {
+		t.Errorf("config[%q] must not be set for self-contained wasm; got %q", configKeyScript, got)
+	}
+}
+
+// emptyWasmModule is a valid module with no imports, exports, or memory: the
+// 8-byte header (magic + version) and nothing else.
+func emptyWasmModule() []byte {
+	return []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}
+}

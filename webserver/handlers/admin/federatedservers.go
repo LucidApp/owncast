@@ -1,0 +1,293 @@
+package admin
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/url"
+	"sort"
+
+	log "github.com/sirupsen/logrus"
+
+	"github.com/owncast/owncast/models"
+	"github.com/owncast/owncast/persistence/federatedserversrepository"
+	activitypubutils "github.com/owncast/owncast/services/activitypub/utils"
+	"github.com/owncast/owncast/webserver/handlers/generated"
+	webutils "github.com/owncast/owncast/webserver/utils"
+)
+
+const (
+	errCodeUnsupportedFeaturedStreams = "UNSUPPORTED_FEATURED_STREAMS"
+	acceptedFollowStatus              = "accepted"
+)
+
+// GetFederatedServers returns the PUBLIC featured-streams directory. It only
+// includes servers whose follow has been accepted by the remote server: a
+// server we have merely requested to feature (still pending approval) must not
+// be advertised to viewers as featured until it has consented. Use
+// GetAdminFederatedServers for the full admin-facing list.
+func (a *Admin) GetFederatedServers(w http.ResponseWriter, r *http.Request) {
+	servers, err := getFederatedServersList()
+	if err != nil {
+		webutils.WriteSimpleResponse(w, false, err.Error())
+		return
+	}
+	accepted := make([]publicFederatedServer, 0, len(servers))
+	for _, s := range servers {
+		if s.FollowStatus == acceptedFollowStatus {
+			accepted = append(accepted, publicFederatedServerFromModel(s))
+		}
+	}
+
+	writeFederatedServersResponse(w, accepted)
+}
+
+type publicFederatedServer struct {
+	ID                int64    `json:"id"`
+	IRI               string   `json:"iri"`
+	Name              *string  `json:"name,omitempty"`
+	LogoURL           *string  `json:"logoUrl,omitempty"`
+	IsOnline          bool     `json:"isOnline"`
+	StreamTitle       *string  `json:"streamTitle,omitempty"`
+	StreamDescription *string  `json:"streamDescription,omitempty"`
+	Tags              []string `json:"tags,omitempty"`
+	ThumbnailURL      *string  `json:"thumbnailUrl,omitempty"`
+	DisplayName       *string  `json:"displayName,omitempty"`
+	Summary           *string  `json:"summary,omitempty"`
+}
+
+func publicFederatedServerFromModel(s models.FederatedServer) publicFederatedServer {
+	return publicFederatedServer{
+		ID: s.ID, IRI: s.IRI, Name: s.Name, LogoURL: s.LogoURL, IsOnline: s.IsOnline,
+		StreamTitle: s.StreamTitle, StreamDescription: s.StreamDescription,
+		Tags: s.Tags, ThumbnailURL: s.ThumbnailURL, DisplayName: s.DisplayName, Summary: s.Summary,
+	}
+}
+
+// GetAdminFederatedServers returns the full federated-servers list for the
+// admin UI, including entries whose follow is still pending approval (shown in
+// the admin as "pending approval") and any rejected ones. This endpoint
+// requires admin auth; the public directory (GetFederatedServers) is filtered
+// to accepted servers only.
+func (a *Admin) GetAdminFederatedServers(w http.ResponseWriter, r *http.Request) {
+	servers, err := getFederatedServersList()
+	if err != nil {
+		webutils.WriteSimpleResponse(w, false, err.Error())
+		return
+	}
+
+	// Keep accepted servers in canonical priority order. Pending and rejected
+	// rows are management-only and follow the accepted sequence.
+	sort.SliceStable(servers, func(i, j int) bool {
+		iAccepted := servers[i].FollowStatus == acceptedFollowStatus
+		jAccepted := servers[j].FollowStatus == acceptedFollowStatus
+		if iAccepted != jAccepted {
+			return iAccepted
+		}
+		if iAccepted && servers[i].Priority != servers[j].Priority {
+			return servers[i].Priority < servers[j].Priority
+		}
+		return servers[i].AddedAt.Before(servers[j].AddedAt)
+	})
+
+	writeFederatedServersResponse(w, servers)
+}
+
+// nil slice to empty.
+func getFederatedServersList() ([]models.FederatedServer, error) {
+	repo := federatedserversrepository.Get()
+	if repo == nil {
+		return nil, fmt.Errorf("federated servers repository is not initialised")
+	}
+
+	servers, err := repo.GetFederatedServers()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get federated servers: %w", err)
+	}
+
+	if servers == nil {
+		servers = []models.FederatedServer{}
+	}
+	return servers, nil
+}
+
+// writeFederatedServersResponse encodes the standard {servers: [...]} body.
+func writeFederatedServersResponse(w http.ResponseWriter, servers interface{}) {
+	response := struct {
+		Servers interface{} `json:"servers"`
+	}{
+		Servers: servers,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		log.Errorln("Failed to encode federated servers response:", err)
+		webutils.WriteSimpleResponse(w, false, "Failed to encode response")
+		return
+	}
+}
+
+// GetFeatureRequests returns the pending requests from other Owncast servers
+// asking to feature this server's stream in their directory. These always
+// require explicit approval (via the follower-approval endpoint) before the
+// requesting server is allowed to list us.
+func (a *Admin) GetFeatureRequests(w http.ResponseWriter, r *http.Request) {
+	requests, err := a.followersRepository.GetPendingFeaturedFollowRequests()
+	if err != nil {
+		webutils.WriteSimpleResponse(w, false, "Failed to get feature requests: "+err.Error())
+		return
+	}
+
+	// Ensure we return an empty array instead of null.
+	if requests == nil {
+		requests = []models.Follower{}
+	}
+
+	response := struct {
+		Requests interface{} `json:"requests"`
+	}{
+		Requests: requests,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		log.Errorln("Failed to encode feature requests response:", err)
+		webutils.WriteSimpleResponse(w, false, "Failed to encode response")
+		return
+	}
+}
+
+// AddFederatedServer kicks off a Follow request to another Owncast
+// instance and stores a pending follow record.
+func (a *Admin) AddFederatedServer(w http.ResponseWriter, r *http.Request) {
+	var request generated.AddFederatedServerJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		webutils.WriteSimpleResponse(w, false, "Invalid request body: "+err.Error())
+		return
+	}
+
+	serverURL, err := url.Parse(request.Url)
+	if err != nil {
+		webutils.WriteSimpleResponse(w, false, "Invalid server URL: "+err.Error())
+		return
+	}
+
+	if serverURL.Scheme == "" {
+		serverURL.Scheme = "https"
+	}
+
+	if serverURL.Scheme != "https" {
+		webutils.WriteSimpleResponse(w, false, "Server URL must use https protocol for federation")
+		return
+	}
+
+	repo := federatedserversrepository.Get()
+	if repo == nil {
+		webutils.WriteSimpleResponse(w, false, "Federated servers repository is not initialised")
+		return
+	}
+
+	existingServer, _ := repo.GetFederatedServer(serverURL.String())
+	if existingServer != nil {
+		webutils.WriteSimpleResponse(w, false, "Already following this federated server")
+		return
+	}
+
+	isStreamConnected := a.stream.GetStatus().Online
+	if err := a.activitypub.Outbox().SendFollowRequestToOwncastServerURL(serverURL.String(), isStreamConnected); err != nil {
+		log.Errorf("Failed to send follow request to %s: %v", serverURL.String(), err)
+		if errors.Is(err, activitypubutils.ErrFeaturedStreamsUnsupported) {
+			webutils.WriteSimpleResponseWithCode(w, false, "Featured streams unsupported by remote server", errCodeUnsupportedFeaturedStreams)
+			return
+		}
+		webutils.WriteSimpleResponse(w, false, "Failed to send follow request: "+err.Error())
+		return
+	}
+
+	log.Debugf("Sent follow request to federated server: %s", serverURL.String())
+	webutils.WriteSimpleResponse(w, true, "Follow request sent successfully. The server will appear in your list once they accept the follow.")
+}
+
+// RemoveFederatedServer removes a federated server by ID.
+func (a *Admin) RemoveFederatedServer(w http.ResponseWriter, r *http.Request, id int) {
+	repo := federatedserversrepository.Get()
+	if repo == nil {
+		webutils.WriteSimpleResponse(w, false, "Federated servers repository is not initialised")
+		return
+	}
+
+	// Look up the server's IRI before deleting so we can tell it to drop us
+	// as a follower.
+	var iri string
+	if servers, err := repo.GetFederatedServers(); err == nil {
+		for _, srv := range servers {
+			if srv.ID == int64(id) {
+				iri = srv.IRI
+				break
+			}
+		}
+	}
+
+	if err := repo.RemoveFederatedServer(int64(id)); err != nil {
+		log.Errorf("Failed to remove federated server with ID %d: %v", id, err)
+		webutils.WriteSimpleResponse(w, false, "Failed to remove federated server: "+err.Error())
+		return
+	}
+
+	// Send an Undo of our Follow so the remote stops treating us as a follower.
+	// Best-effort: the local removal already succeeded.
+	if iri != "" {
+		if err := a.activitypub.Outbox().SendUnfollowRequestToOwncastServerURL(iri); err != nil {
+			log.Warnf("Unfeatured %s but failed to send unfollow: %v", iri, err)
+		}
+	}
+
+	log.Infof("Removed federated server with ID: %d", id)
+	webutils.WriteSimpleResponse(w, true, "Federated server removed successfully")
+}
+
+// AddFederatedServerOptions handles CORS preflight requests.
+func (a *Admin) AddFederatedServerOptions(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// RemoveFederatedServerOptions handles CORS preflight requests.
+func (a *Admin) RemoveFederatedServerOptions(w http.ResponseWriter, r *http.Request, id int) {
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ReorderFederatedServer moves a federated server one step up or down in the
+// operator-set canonical priority order.
+func (a *Admin) ReorderFederatedServer(w http.ResponseWriter, r *http.Request, id int) {
+	var request struct {
+		Direction string `json:"direction"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		webutils.WriteSimpleResponse(w, false, "Invalid request body: "+err.Error())
+		return
+	}
+	if request.Direction != "up" && request.Direction != "down" {
+		webutils.WriteSimpleResponse(w, false, "direction must be 'up' or 'down'")
+		return
+	}
+
+	repo := federatedserversrepository.Get()
+	if repo == nil {
+		webutils.WriteSimpleResponse(w, false, "Federated servers repository is not initialised")
+		return
+	}
+
+	if err := repo.ReorderFederatedServer(int64(id), request.Direction); err != nil {
+		log.Errorf("Failed to reorder federated server %d: %v", id, err)
+		webutils.WriteSimpleResponse(w, false, "Failed to reorder federated server: "+err.Error())
+		return
+	}
+
+	webutils.WriteSimpleResponse(w, true, "Federated server reordered successfully")
+}
+
+// ReorderFederatedServerOptions handles CORS preflight requests.
+func (a *Admin) ReorderFederatedServerOptions(w http.ResponseWriter, r *http.Request, id int) {
+	w.WriteHeader(http.StatusNoContent)
+}

@@ -1,13 +1,12 @@
 /* eslint-disable react/no-danger */
 import Head from 'next/head';
 import { FC, useEffect, useState } from 'react';
-import { useRecoilValue } from 'recoil';
-import { ClientConfig } from '../../interfaces/client-config.model';
+import { useAtomValue } from 'jotai';
 import { clientConfigStateAtom } from '../stores/ClientConfigStore';
 
 export const Theme: FC = () => {
-  const clientConfig = useRecoilValue<ClientConfig>(clientConfigStateAtom);
-  const { appearanceVariables, customStyles } = clientConfig;
+  const clientConfig = useAtomValue(clientConfigStateAtom);
+  const { appearanceVariables, customStyles, pluginStyles } = clientConfig;
 
   const appearanceVars = Object.keys(appearanceVariables || {})
     .filter(variable => !!appearanceVariables[variable])
@@ -27,6 +26,24 @@ export const Theme: FC = () => {
       <Head>
         <meta name="theme-color" content={themeColor} />
       </Head>
+      {/*
+        Appearance cascade, low to high priority (the later style block
+        wins): plugin styles (baseline), then admin appearance
+        variables, then admin custom CSS. So a plugin theme provides a
+        baseline and the admin's explicit colors and CSS layer on top
+        and win on overlap.
+
+        pluginStyles is every loaded plugin's manifest.styles followed
+        by its on_page_styles output, concatenated server-side with a
+        per-plugin delimiter comment for devtools attribution.
+      */}
+      <style
+        dangerouslySetInnerHTML={{
+          __html: `
+				${pluginStyles}
+			`,
+        }}
+      />
       <style
         dangerouslySetInnerHTML={{
           __html: `
@@ -36,6 +53,7 @@ export const Theme: FC = () => {
 			`,
         }}
       />
+      {/* customStyles is the admin's own custom CSS, rendered last. */}
       <style
         dangerouslySetInnerHTML={{
           __html: `

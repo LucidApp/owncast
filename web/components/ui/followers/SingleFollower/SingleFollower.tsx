@@ -1,5 +1,5 @@
 import { Avatar, Col, Row } from 'antd';
-import React, { FC } from 'react';
+import { FC } from 'react';
 import cn from 'classnames';
 import { Follower } from '../../../../interfaces/follower';
 import styles from './SingleFollower.module.scss';
@@ -22,7 +22,7 @@ export const SingleFollower: FC<SingleFollowerProps> = ({ follower }) => (
             {(follower.name || follower.username).charAt(0).toUpperCase()}
           </Avatar>
         </Col>
-        <Col>
+        <Col className={styles.textColumn}>
           <Row className={styles.username}>
             {follower.name || follower.username.split('@', 2)[0]}
           </Row>

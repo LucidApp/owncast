@@ -1,0 +1,117 @@
+package handlers
+
+import (
+	"encoding/json"
+	"io"
+	"net/http"
+
+	"github.com/owncast/owncast/utils"
+	"github.com/owncast/owncast/webserver/router/middleware"
+	webutils "github.com/owncast/owncast/webserver/utils"
+)
+
+// ReportCmcd is the CMCD v2 (CTA-5004-A) collector endpoint. It accepts
+// event and response mode reports either as a JSON body (a single report
+// object or an array of batched reports, keyed by CMCD key names) or as a
+// CMCD query parameter in dictionary payload syntax. Players embedded on
+// other origins beacon here, so CORS is fully enabled.
+func (h *Handlers) ReportCmcd(w http.ResponseWriter, r *http.Request) {
+	middleware.EnableCors(w)
+
+	if r.Method == http.MethodOptions {
+		// Cross-origin JSON POSTs preflight with OPTIONS; allow them.
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, CMCD-Request, CMCD-Object, CMCD-Status, CMCD-Session")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	// Reports are tiny; bound the unauthenticated body so a large batched
+	// POST can't force unbounded allocation.
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+
+	reports, err := parseCmcdReports(r)
+	if err != nil {
+		webutils.WriteSimpleResponse(w, false, err.Error())
+		return
+	}
+
+	viewerID := utils.GenerateClientIDFromRequest(r)
+	registered := false
+	reportsDownloadDuration := false
+	for _, keys := range reports {
+		if len(keys) == 0 {
+			continue
+		}
+		h.registerCMCDKeys(cmcdClientID(r, keys), viewerID, keys)
+		registered = true
+		if cmcdReportsDownloadDuration(keys) {
+			reportsDownloadDuration = true
+		}
+	}
+
+	if !registered {
+		webutils.WriteSimpleResponse(w, false, "no CMCD report found in request")
+		return
+	}
+
+	// Keep server timing for event-only clients. They report playback state
+	// and latency but cannot measure each HLS segment's transfer duration.
+	if reportsDownloadDuration {
+		h.metrics.RegisterSelfReportingClient(viewerID)
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
+func cmcdReportsDownloadDuration(keys map[string]any) bool {
+	ttlb, ok := cmcdNumber(keys, "ttlb")
+	return ok && ttlb > 0
+}
+
+// parseCmcdReports extracts CMCD reports from a collector request: a JSON
+// object, a JSON array of objects, a CMCD query parameter, or the four
+// CMCD transmission headers.
+func parseCmcdReports(r *http.Request) ([]map[string]any, error) {
+	requestKeys := parseCMCDRequest(r)
+
+	if r.Method == http.MethodPost {
+		var body any
+		err := json.NewDecoder(r.Body).Decode(&body)
+		if err != nil && err != io.EOF {
+			return nil, err
+		}
+		if err == io.EOF {
+			if requestKeys == nil {
+				return nil, nil
+			}
+			return []map[string]any{requestKeys}, nil
+		}
+
+		switch payload := body.(type) {
+		case []any:
+			reports := make([]map[string]any, 0, len(payload))
+			for _, entry := range payload {
+				if keys, ok := entry.(map[string]any); ok {
+					reports = append(reports, keys)
+				}
+			}
+			if requestKeys != nil {
+				reports = append(reports, requestKeys)
+			}
+			return reports, nil
+		case map[string]any:
+			for key, value := range requestKeys {
+				payload[key] = value
+			}
+			return []map[string]any{payload}, nil
+		default:
+			return nil, nil
+		}
+	}
+
+	if requestKeys != nil {
+		return []map[string]any{requestKeys}, nil
+	}
+	return nil, nil
+}

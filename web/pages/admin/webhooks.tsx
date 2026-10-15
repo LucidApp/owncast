@@ -11,13 +11,20 @@ import {
   Tag,
   Typography,
   Tooltip,
+  message,
 } from 'antd';
 import dynamic from 'next/dynamic';
-import React, { ReactElement, useEffect, useState } from 'react';
+import { EyeOutlined } from '@ant-design/icons';
+import { ReactElement, useContext, useEffect, useState } from 'react';
+import { useTranslation } from 'next-export-i18n';
 import { CREATE_WEBHOOK, DELETE_WEBHOOK, fetchData, WEBHOOKS } from '../../utils/apis';
 import { isValidUrl, DEFAULT_TEXTFIELD_URL_PATTERN } from '../../utils/validators';
+import { Localization } from '../../types/localization';
+import { Translation } from '../../components/ui/Translation/Translation';
 
 import { AdminLayout } from '../../components/layouts/AdminLayout';
+import { ServerStatusContext } from '../../utils/server-status-context';
+import { TextField, TEXTFIELD_TYPE_PASSWORD } from '../../components/admin/TextField';
 
 const { Title, Paragraph } = Typography;
 
@@ -31,6 +38,11 @@ const availableEvents = {
   CHAT: { name: 'Chat messages', description: 'When a user sends a chat message', color: 'purple' },
   USER_JOINED: { name: 'User joined', description: 'When a user joins the chat', color: 'green' },
   USER_PARTED: { name: 'User parted', description: 'When a user leaves the chat', color: 'green' },
+  FEDIVERSE_ENGAGEMENT_FOLLOW: {
+    name: 'New follower',
+    description: 'When a user follows the stream',
+    color: 'green',
+  },
   NAME_CHANGE: {
     name: 'User name changed',
     description: 'When a user changes their name',
@@ -63,17 +75,33 @@ function convertEventStringToTag(eventString: string) {
     </Tooltip>
   );
 }
+
+export const generateRndSecret = () => {
+  let defaultSecret = '';
+  const s = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+
+  defaultSecret = Array.apply(20, Array(30))
+    .map(() => s.charAt(Math.floor(Math.random() * s.length)))
+    .join('');
+  return defaultSecret;
+};
+
 interface Props {
   onCancel: () => void;
-  onOk: any; // todo: make better type
+  onOk: (url: string, events: string[], webhookSecret: string) => void;
   open: boolean;
 }
 
 const NewWebhookModal = (props: Props) => {
   const { onOk, onCancel, open } = props;
+  const { t } = useTranslation();
+  const defaultWebhookSecret = generateRndSecret();
 
   const [selectedEvents, setSelectedEvents] = useState([]);
   const [webhookUrl, setWebhookUrl] = useState('');
+  const [webhookSecret, setWebhookSecret] = useState(defaultWebhookSecret);
+
+  const { serverConfig } = useContext(ServerStatusContext);
 
   const events = Object.keys(availableEvents).map(key => ({
     value: key,
@@ -89,26 +117,36 @@ const NewWebhookModal = (props: Props) => {
   }
 
   function save() {
-    onOk(webhookUrl, selectedEvents);
+    onOk(webhookUrl, selectedEvents, webhookSecret);
 
     // Reset the modal
     setWebhookUrl('');
+    setWebhookSecret(generateRndSecret());
     setSelectedEvents(null);
   }
 
   const okButtonProps = {
-    disabled: selectedEvents?.length === 0 || !isValidUrl(webhookUrl),
+    disabled: selectedEvents?.length === 0 || !isValidUrl(webhookUrl) || webhookSecret.length === 0,
   };
 
-  const checkboxes = events.map(singleEvent => (
-    <Col span={8} key={singleEvent.value}>
-      <Checkbox value={singleEvent.value}>{singleEvent.label}</Checkbox>
-    </Col>
-  ));
+  const checkboxes = events
+    .filter(singleEvent => {
+      switch (singleEvent.value) {
+        case 'FEDIVERSE_ENGAGEMENT_FOLLOW':
+          return serverConfig.federation.enabled;
+        default:
+          return true;
+      }
+    })
+    .map(singleEvent => (
+      <Col span={8} key={singleEvent.value}>
+        <Checkbox value={singleEvent.value}>{singleEvent.label}</Checkbox>
+      </Col>
+    ));
 
   return (
     <Modal
-      title="Create New Webhook"
+      title={t(Localization.Admin.Webhooks.createNewWebhook)}
       open={open}
       onOk={save}
       onCancel={onCancel}
@@ -117,20 +155,35 @@ const NewWebhookModal = (props: Props) => {
       <div>
         <Input
           value={webhookUrl}
-          placeholder="https://myserver.com/webhook"
+          placeholder={t(Localization.Admin.Webhooks.webhookUrlPlaceholder)}
           onChange={input => setWebhookUrl(input.currentTarget.value.trim())}
           type="url"
           pattern={DEFAULT_TEXTFIELD_URL_PATTERN}
         />
       </div>
 
-      <p>Select the events that will be sent to this webhook.</p>
+      <p>
+        <Translation translationKey={Localization.Admin.Webhooks.webhookSecret} />
+      </p>
+      <div>
+        <TextField
+          fieldName="webhook-secret"
+          value={webhookSecret}
+          placeholder="****"
+          type={TEXTFIELD_TYPE_PASSWORD}
+          onChange={input => setWebhookSecret(input.value.trim())}
+        />
+      </div>
+
+      <p>
+        <Translation translationKey={Localization.Admin.Webhooks.selectEvents} />
+      </p>
       <Checkbox.Group style={{ width: '100%' }} value={selectedEvents} onChange={onChange}>
         <Row>{checkboxes}</Row>
       </Checkbox.Group>
       <p>
         <Button type="primary" onClick={selectAll}>
-          Select all
+          <Translation translationKey={Localization.Admin.Webhooks.selectAll} />
         </Button>
       </p>
     </Modal>
@@ -140,6 +193,7 @@ const NewWebhookModal = (props: Props) => {
 const Webhooks = () => {
   const [webhooks, setWebhooks] = useState([]);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [showSecretMap, setShowSecretMap] = useState({});
 
   function handleError(error) {
     console.error('error', error);
@@ -167,11 +221,11 @@ const Webhooks = () => {
     }
   }
 
-  async function handleSave(url: string, events: string[]) {
+  async function handleSave(url: string, events: string[], webhookSecret: string) {
     try {
       const newHook = await fetchData(CREATE_WEBHOOK, {
         method: 'POST',
-        data: { url, events },
+        data: { url, events, secret: webhookSecret },
       });
       setWebhooks(webhooks.concat(newHook));
     } catch (error) {
@@ -183,13 +237,20 @@ const Webhooks = () => {
     setIsModalOpen(true);
   };
 
-  const handleModalSaveButton = (url, events) => {
+  const handleModalSaveButton = (url, events, webhookSecret) => {
     setIsModalOpen(false);
-    handleSave(url, events);
+    handleSave(url, events, webhookSecret);
   };
 
   const handleModalCancelButton = () => {
     setIsModalOpen(false);
+  };
+
+  const handleToggleShowSecret = key => {
+    setShowSecretMap({
+      ...showSecretMap,
+      [key]: !showSecretMap[key],
+    });
   };
 
   const columns = [
@@ -220,6 +281,33 @@ const Webhooks = () => {
             })
           }
         </>
+      ),
+    },
+    {
+      title: 'Webhook Secret',
+      dataIndex: 'secret',
+      onCell: () => ({
+        style: { minWidth: 200 },
+      }),
+      key: 'secret',
+      render: secret => (
+        <Space direction="horizontal">
+          <Paragraph
+            copyable={{
+              text: secret,
+              onCopy: () => message.success('Copied to clipboard'),
+            }}
+          >
+            {showSecretMap[secret] ? secret : '**********'}
+          </Paragraph>
+
+          <Button
+            type="link"
+            style={{ top: '-7px' }}
+            icon={<EyeOutlined />}
+            onClick={() => handleToggleShowSecret(secret)}
+          />
+        </Space>
       ),
     },
   ];

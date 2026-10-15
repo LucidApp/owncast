@@ -1,17 +1,18 @@
-import React, { useState, useEffect, useContext, ReactElement } from 'react';
+import { useState, useEffect, useContext, ReactElement } from 'react';
 import { Row, Col, Typography, MenuProps, Dropdown, Spin, Alert } from 'antd';
 import { getUnixTime, sub } from 'date-fns';
 import dynamic from 'next/dynamic';
 import { useTranslation } from 'next-export-i18n';
 import { Chart } from '../../components/admin/Chart';
 import { StatisticItem } from '../../components/admin/StatisticItem';
-import { ViewerTable } from '../../components/admin/ViewerTable';
+import { PlaybackClientTable } from '../../components/admin/PlaybackClientTable';
 
 import { ServerStatusContext } from '../../utils/server-status-context';
 
-import { VIEWERS_OVER_TIME, ACTIVE_VIEWER_DETAILS, fetchData } from '../../utils/apis';
+import { VIEWERS_OVER_TIME, PLAYBACK_CLIENT_DETAILS, fetchData } from '../../utils/apis';
 
 import { AdminLayout } from '../../components/layouts/AdminLayout';
+import { Localization } from '../../types/localization';
 
 // Lazy loaded components
 
@@ -24,6 +25,7 @@ const UserOutlined = dynamic(() => import('@ant-design/icons/UserOutlined'), {
 });
 
 const FETCH_INTERVAL = 60 * 1000; // 1 min
+const PLAYBACK_FETCH_INTERVAL = 15 * 1000; // 15 sec
 
 export default function ViewersOverTime() {
   const context = useContext(ServerStatusContext);
@@ -36,19 +38,20 @@ export default function ViewersOverTime() {
   }
 
   const times = [
-    { title: t('Current stream'), start: streamStart },
-    { title: t('Last 12 hours'), start: sub(new Date(), { hours: 12 }) },
-    { title: t('Last 24 hours'), start: sub(new Date(), { hours: 24 }) },
-    { title: t('Last 7 days'), start: sub(new Date(), { days: 7 }) },
-    { title: t('Last 30 days'), start: sub(new Date(), { days: 30 }) },
-    { title: t('Last 3 months'), start: sub(new Date(), { months: 3 }) },
-    { title: t('Last 6 months'), start: sub(new Date(), { months: 6 }) },
+    { title: t(Localization.Admin.ViewerInfo.currentStream), start: streamStart },
+    { title: t(Localization.Admin.ViewerInfo.last12Hours), start: sub(new Date(), { hours: 12 }) },
+    { title: t(Localization.Admin.ViewerInfo.last24Hours), start: sub(new Date(), { hours: 24 }) },
+    { title: t(Localization.Admin.ViewerInfo.last7Days), start: sub(new Date(), { days: 7 }) },
+    { title: t(Localization.Admin.ViewerInfo.last30Days), start: sub(new Date(), { days: 30 }) },
+    { title: t(Localization.Admin.ViewerInfo.last3Months), start: sub(new Date(), { months: 3 }) },
+    { title: t(Localization.Admin.ViewerInfo.last6Months), start: sub(new Date(), { months: 6 }) },
   ];
 
   const [loadingChart, setLoadingChart] = useState(true);
   const [viewerInfo, setViewerInfo] = useState([]);
-  const [viewerDetails, setViewerDetails] = useState([]);
+  const [playbackClients, setPlaybackClients] = useState([]);
   const [timeWindowStart, setTimeWindowStart] = useState(times[1]);
+  const [timeWindowKey, setTimeWindowKey] = useState(1);
 
   const getInfo = async () => {
     try {
@@ -59,14 +62,32 @@ export default function ViewersOverTime() {
     } catch (error) {
       console.log('==== error', error);
     }
+  };
 
+  const getPlaybackClients = async () => {
     try {
-      const result = await fetchData(ACTIVE_VIEWER_DETAILS);
-      setViewerDetails(result);
+      const result = await fetchData(PLAYBACK_CLIENT_DETAILS);
+      setPlaybackClients(result);
     } catch (error) {
       console.log('==== error', error);
     }
   };
+
+  // Playback health describes what viewers are experiencing right now, and
+  // a client's measurements expire a minute after it stops playing, so this
+  // polls faster than the viewer count chart above it.
+  useEffect(() => {
+    if (!online) {
+      setPlaybackClients([]);
+      return () => {};
+    }
+
+    getPlaybackClients();
+    const intervalId = setInterval(getPlaybackClients, PLAYBACK_FETCH_INTERVAL);
+    return () => {
+      clearInterval(intervalId);
+    };
+  }, [online]);
 
   useEffect(() => {
     let getStatusIntervalId = null;
@@ -85,6 +106,7 @@ export default function ViewersOverTime() {
 
   const onTimeWindowSelect = ({ key }) => {
     setTimeWindowStart(times[key]);
+    setTimeWindowKey(Number(key));
   };
 
   const offset: number = online && streamStart ? 0 : 1;
@@ -96,13 +118,13 @@ export default function ViewersOverTime() {
 
   return (
     <>
-      <Typography.Title>{t('Viewer Info')}</Typography.Title>
+      <Typography.Title>{t(Localization.Admin.ViewerInfo.title)}</Typography.Title>
       <br />
       <Row gutter={[16, 16]} justify="space-around">
         {online && (
           <Col span={8} md={8}>
             <StatisticItem
-              title={t('Current viewers')}
+              title={t(Localization.Admin.ViewerInfo.currentViewers)}
               value={viewerCount.toString()}
               prefix={<UserOutlined />}
             />
@@ -110,38 +132,45 @@ export default function ViewersOverTime() {
         )}
         <Col md={online ? 8 : 12}>
           <StatisticItem
-            title={online ? t('Max viewers this stream') : t('Max viewers last stream')}
+            title={
+              online
+                ? t(Localization.Admin.ViewerInfo.maxViewersThisStream)
+                : t(Localization.Admin.ViewerInfo.maxViewersLastStream)
+            }
             value={sessionPeakViewerCount.toString()}
             prefix={<UserOutlined />}
           />
         </Col>
         <Col md={online ? 8 : 12}>
           <StatisticItem
-            title={t('max viewers')}
+            title={t(Localization.Admin.ViewerInfo.maxViewers)}
             value={overallPeakViewerCount.toString()}
             prefix={<UserOutlined />}
           />
         </Col>
       </Row>
-      {!viewerInfo.length && (
+      {/* Scoped to the chart above the playback table: viewer counts are
+          sampled every couple of minutes, so a stream can have viewers
+          watching right now and still have nothing to plot. */}
+      {!viewerInfo.length && !loadingChart && (
         <Alert
           style={{ marginTop: '10px' }}
           banner
-          message={t('Please wait')}
-          description={t('No viewer data has been collected yet.')}
+          message={t(Localization.Admin.ViewerInfo.chartNoData)}
           type="info"
         />
       )}
 
-      <Spin spinning={!viewerInfo.length || loadingChart}>
+      <Spin spinning={loadingChart}>
         {viewerInfo.length > 0 && (
           <Chart
-            title={t('Viewers')}
+            title={t(Localization.Admin.ViewerInfo.viewers)}
             data={viewerInfo}
             color="#2087E2"
             unit="viewers"
             minYValue={0}
             yStepSize={1}
+            timeWindowKey={timeWindowKey}
           />
         )}
 
@@ -159,8 +188,15 @@ export default function ViewersOverTime() {
             {timeWindowStart.title} <DownOutlined />
           </button>
         </Dropdown>
-        <ViewerTable data={viewerDetails} />
       </Spin>
+      {/* Rendered whether or not a stream is live. Offline it is an empty
+          table, which is the honest answer to "who is watching" and keeps
+          the section from vanishing when a streamer goes looking for it. */}
+      <Typography.Title level={3}>{t(Localization.Admin.PlaybackClients.title)}</Typography.Title>
+      <Typography.Paragraph>
+        {t(Localization.Admin.PlaybackClients.description)}
+      </Typography.Paragraph>
+      <PlaybackClientTable data={playbackClients} />
     </>
   );
 }

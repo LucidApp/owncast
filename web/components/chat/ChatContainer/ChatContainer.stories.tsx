@@ -1,6 +1,6 @@
 import { useState } from 'react';
-import { StoryFn, Meta } from '@storybook/react';
-import { RecoilRoot } from 'recoil';
+import { StoryFn, Meta } from '@storybook/nextjs';
+import { Provider } from 'jotai';
 import { ChatContainer } from './ChatContainer';
 import { ChatMessage } from '../../../interfaces/chat-message.model';
 
@@ -577,14 +577,14 @@ const AddMessagesChatExample = args => {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>(m);
 
   return (
-    <RecoilRoot>
+    <Provider>
       <div style={{ height: '70vh', position: 'relative' }}>
         <button type="button" onClick={() => setChatMessages([...chatMessages, chatMessages[0]])}>
           Add message
         </button>
         <ChatContainer {...args} />
       </div>
-    </RecoilRoot>
+    </Provider>
   );
 };
 
@@ -615,6 +615,22 @@ export const ChatDisabled = {
     isModerator: true,
     showInput: true,
     chatAvailable: false,
+  },
+};
+
+export const AuthenticationRequired = {
+  render: Template,
+
+  args: {
+    loading: false,
+    messages,
+    usernameToHighlight: 'testuser',
+    chatUserId: 'testuser',
+    isModerator: false,
+    showInput: true,
+    chatAvailable: true,
+    inputEnabled: false,
+    inputDisabledPlaceholder: 'Authenticate to chat',
   },
 };
 

@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
-	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -12,6 +11,8 @@ import (
 	"github.com/andybalholm/cascadia"
 	"github.com/pkg/errors"
 	"golang.org/x/net/html"
+
+	"github.com/owncast/owncast/utils"
 )
 
 func createAuthRequest(authDestination, userID, displayName, accessToken, baseServer string) (*Request, error) {
@@ -74,11 +75,15 @@ func getAuthEndpointFromURL(urlstring string) (*url.URL, error) {
 		return nil, errors.Wrap(err, "unable to parse URL")
 	}
 
-	if htmlDocScrapeURL.Scheme != "https" {
+	if htmlDocScrapeURL.Scheme != schemeHTTPS {
 		return nil, fmt.Errorf("url must be https")
 	}
+	if utils.IsHostnameInternal(htmlDocScrapeURL.Hostname()) {
+		return nil, errors.New("unable to use provided host")
+	}
 
-	r, err := http.Get(htmlDocScrapeURL.String()) // nolint:gosec
+	client := utils.GetFederationHTTPClient()
+	r, err := client.Get(htmlDocScrapeURL.String())
 	if err != nil {
 		return nil, err
 	}

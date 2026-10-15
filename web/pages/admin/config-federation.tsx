@@ -1,6 +1,6 @@
 /* eslint-disable react/no-unescaped-entities */
 import { Typography, Modal, Button, Row, Col, Alert } from 'antd';
-import React, { ReactElement, useContext, useEffect, useState, FC } from 'react';
+import { ReactElement, useContext, useEffect, useState, FC } from 'react';
 import {
   TEXTFIELD_TYPE_TEXT,
   TEXTFIELD_TYPE_TEXTAREA,
@@ -16,6 +16,8 @@ import {
   TEXTFIELD_PROPS_FEDERATION_DEFAULT_USER,
   FIELD_PROPS_FEDERATION_IS_PRIVATE,
   FIELD_PROPS_SHOW_FEDERATION_ENGAGEMENT,
+  FIELD_PROPS_FEDERATION_ENABLE_QUOTES,
+  FIELD_PROPS_FEDERATION_HIDE_FOLLOWERS,
   TEXTFIELD_PROPS_FEDERATION_INSTANCE_URL,
   FIELD_PROPS_FEDERATION_BLOCKED_DOMAINS,
   postConfigUpdateToAPI,
@@ -100,8 +102,16 @@ const ConfigFederation = () => {
   const [blockedDomainSaveState, setBlockedDomainSaveState] = useState(null);
 
   const { federation, yp, instanceDetails } = serverConfig;
-  const { enabled, isPrivate, username, goLiveMessage, showEngagement, blockedDomains } =
-    federation;
+  const {
+    enabled,
+    isPrivate,
+    username,
+    goLiveMessage,
+    showEngagement,
+    enableQuotes,
+    hideFollowersTab,
+    blockedDomains,
+  } = federation;
   const { instanceUrl } = yp;
   const { nsfw } = instanceDetails;
 
@@ -257,6 +267,8 @@ const ConfigFederation = () => {
       username,
       goLiveMessage,
       showEngagement,
+      enableQuotes,
+      hideFollowersTab,
       blockedDomains,
       nsfw,
       instanceUrl: yp.instanceUrl,
@@ -364,6 +376,18 @@ const ConfigFederation = () => {
             fieldName="showEngagement"
             {...FIELD_PROPS_SHOW_FEDERATION_ENGAGEMENT}
             checked={formDataValues.showEngagement}
+            disabled={!enabled}
+          />
+          <ToggleSwitch
+            fieldName="enableQuotes"
+            {...FIELD_PROPS_FEDERATION_ENABLE_QUOTES}
+            checked={formDataValues.enableQuotes}
+            disabled={!enabled}
+          />
+          <ToggleSwitch
+            fieldName="hideFollowersTab"
+            {...FIELD_PROPS_FEDERATION_HIDE_FOLLOWERS}
+            checked={formDataValues.hideFollowersTab}
             disabled={!enabled}
           />
         </Col>

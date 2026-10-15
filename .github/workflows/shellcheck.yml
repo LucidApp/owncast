@@ -1,3 +1,11 @@
+# This workflow checks shell scripts for common issues using shellcheck
+# Triggers:
+#   - Push/PR to develop with changes to .sh files
+# Checks:
+#   - All shell scripts recursively
+#   - Reports info-level severity and above
+#   - Follows sourced files with -x flag
+
 name: Lint
 
 on:
@@ -18,21 +26,31 @@ jobs:
     env:
       LANG: C.UTF-8
     container:
-      image: docker.io/ubuntu:24.04
+      image: docker.io/ubuntu:26.04
     steps:
+      - id: skip_check
+        uses: fkirc/skip-duplicate-actions@v5
+        with:
+          concurrent_skipping: 'same_content_newer'
+          cancel_others: 'true'
+          skip_after_successful_duplicate: 'true'
+
       - name: Check out pull request code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         if: github.event_name == 'pull_request'
         with:
           repository: ${{ github.event.pull_request.head.repo.full_name }}
 
       - name: Check out repository code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         if: github.event_name == 'push'
 
       - name: Install shellcheck
         run: apt update && apt install -y shellcheck bash && shellcheck --version
 
       - name: Check shell scripts
-        run: shopt -s globstar && ls **/*.sh && shellcheck -x -P "SCRIPTDIR" --severity=info **/*.sh
+        # SC2329 (function never invoked) is excluded: shellcheck 0.11.0 added it
+        # but does not recognize functions invoked indirectly via `trap` (e.g. the
+        # cleanup() handlers in these test scripts), producing false positives.
+        run: shopt -s globstar && ls **/*.sh && shellcheck -x -P "SCRIPTDIR" --severity=info --exclude=SC2329 **/*.sh
         shell: bash

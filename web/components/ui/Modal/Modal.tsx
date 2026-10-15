@@ -1,6 +1,6 @@
 import { Spin, Modal as AntModal } from 'antd';
-import React, { FC, ReactNode, useState } from 'react';
-import { ErrorBoundary } from 'react-error-boundary';
+import { FC, ReactNode, useState } from 'react';
+import { ErrorBoundary, getErrorMessage } from 'react-error-boundary';
 import { ComponentError } from '../ComponentError/ComponentError';
 import styles from './Modal.module.scss';
 
@@ -14,6 +14,8 @@ export type ModalProps = {
   children?: ReactNode;
   height?: string;
   width?: string;
+  maskClosable?: boolean;
+  destroyOnClose?: boolean;
 };
 
 export const Modal: FC<ModalProps> = ({
@@ -25,6 +27,8 @@ export const Modal: FC<ModalProps> = ({
   afterClose = undefined,
   height,
   width,
+  maskClosable = true,
+  destroyOnClose = true,
   children = undefined,
 }) => {
   const [loading, setLoading] = useState(!!url);
@@ -71,15 +75,15 @@ export const Modal: FC<ModalProps> = ({
       zIndex={999}
       footer={null}
       centered
-      destroyOnClose
-      className={styles.modal}
+      maskClosable={maskClosable}
+      destroyOnClose={destroyOnClose}
     >
       <ErrorBoundary
         // eslint-disable-next-line react/no-unstable-nested-components
         fallbackRender={({ error, resetErrorBoundary }) => (
           <ComponentError
             componentName="Modal"
-            message={error.message}
+            message={getErrorMessage(error)}
             retryFunction={resetErrorBoundary}
           />
         )}

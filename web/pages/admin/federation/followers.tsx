@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useContext, ReactElement } from 'react';
+import { useEffect, useState, useContext, ReactElement } from 'react';
 import { Table, Avatar, Button, Tabs } from 'antd';
 import { ColumnsType, SortOrder } from 'antd/lib/table/interface';
 import { format } from 'date-fns';
@@ -9,6 +9,7 @@ import {
   FOLLOWERS_PENDING,
   SET_FOLLOWER_APPROVAL,
   FOLLOWERS_BLOCKED,
+  REMOVE_FOLLOWER,
   fetchData,
 } from '../../../utils/apis';
 import { isEmptyObject } from '../../../utils/format';
@@ -21,7 +22,13 @@ const UserAddOutlined = dynamic(() => import('@ant-design/icons/UserAddOutlined'
   ssr: false,
 });
 
-const UserDeleteOutlined = dynamic(() => import('@ant-design/icons/UserDeleteOutlined'), {
+// Used for removing a follower (without blocking them).
+const DeleteOutlined = dynamic(() => import('@ant-design/icons/DeleteOutlined'), {
+  ssr: false,
+});
+
+// Used for blocking/banning a follower; a clearer "no entry" mark.
+const StopOutlined = dynamic(() => import('@ant-design/icons/StopOutlined'), {
   ssr: false,
 });
 export interface Follower {
@@ -171,6 +178,24 @@ export default function FediverseFollowers() {
     }
   }
 
+  // Remove a follower without blocking them. They are free to follow again.
+  async function removeFollower(request) {
+    try {
+      await fetchData(REMOVE_FOLLOWER, {
+        auth: true,
+        method: 'POST',
+        data: {
+          actorIRI: request.link,
+        },
+      });
+
+      // Refetch and update the current data.
+      getFollowers();
+    } catch (err) {
+      console.error(err);
+    }
+  }
+
   const pendingColumns: ColumnsType<Follower> = [...columns];
   pendingColumns.unshift(
     {
@@ -196,7 +221,8 @@ export default function FediverseFollowers() {
         <Button
           type="primary"
           danger
-          icon={<UserDeleteOutlined />}
+          title="Reject and block this request"
+          icon={<StopOutlined />}
           onClick={() => {
             rejectFollowRequest(request);
           }}
@@ -286,12 +312,28 @@ export default function FediverseFollowers() {
     {
       title: 'Remove',
       dataIndex: null,
-      key: null,
+      key: 'remove',
+      render: request => (
+        <Button
+          title="Remove this follower (they can follow again)"
+          icon={<DeleteOutlined />}
+          onClick={() => {
+            removeFollower(request);
+          }}
+        />
+      ),
+      width: 50,
+    },
+    {
+      title: 'Block',
+      dataIndex: null,
+      key: 'block',
       render: request => (
         <Button
           type="primary"
           danger
-          icon={<UserDeleteOutlined />}
+          title="Block this follower (prevents them from following again)"
+          icon={<StopOutlined />}
           onClick={() => {
             rejectFollowRequest(request);
           }}
@@ -357,7 +399,9 @@ export default function FediverseFollowers() {
 
   const items = [
     { label: followersTabTitle, key: '1', children: followersTab },
-    isPrivate && { label: pendingRequestsTabTitle, key: '2', children: pendingRequestsTab },
+    ...(isPrivate
+      ? [{ label: pendingRequestsTabTitle, key: '2', children: pendingRequestsTab }]
+      : []),
     { label: blockedTabTitle, key: '3', children: blockedTab },
   ];
 

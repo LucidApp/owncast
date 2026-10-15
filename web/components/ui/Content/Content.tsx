@@ -1,12 +1,14 @@
-import { useRecoilState, useRecoilValue } from 'recoil';
+import { useAtom, useAtomValue } from 'jotai';
 import { Skeleton, Row, Button, Spin } from 'antd';
 import MessageFilled from '@ant-design/icons/MessageFilled';
 import { FC, useEffect, useState } from 'react';
 import dynamic from 'next/dynamic';
 import classnames from 'classnames';
+import { useTranslation } from 'next-export-i18n';
 import ActionButtons from './ActionButtons';
 import { LOCAL_STORAGE_KEYS, getLocalStorage, setLocalStorage } from '../../../utils/localStorage';
 import { canPushNotificationsBeSupported } from '../../../utils/browserPushNotifications';
+import { Localization } from '../../../types/localization';
 
 import {
   clientConfigStateAtom,
@@ -19,22 +21,21 @@ import {
   serverStatusState,
   isChatAvailableSelector,
   visibleChatMessagesSelector,
+  chatAuthenticatedAtom,
+  isClientConfigLoadedAtom,
 } from '../../stores/ClientConfigStore';
-import { ClientConfig } from '../../../interfaces/client-config.model';
 
 import styles from './Content.module.scss';
 import desktopStyles from './DesktopContent.module.scss';
 import { OfflineBanner } from '../OfflineBanner/OfflineBanner';
-import { AppStateOptions } from '../../stores/application-state';
-import { ServerStatus } from '../../../interfaces/server-status.model';
+import { OfflineRecommendation } from '../OfflineRecommendation/OfflineRecommendation';
 import { Statusbar } from '../Statusbar/Statusbar';
-import { ChatMessage } from '../../../interfaces/chat-message.model';
 import { ExternalAction } from '../../../interfaces/external-action';
 import { Modal } from '../Modal/Modal';
 import { DesktopContent } from './DesktopContent';
 import { MobileContent } from './MobileContent';
-import { ChatModal } from '../../modals/ChatModal/ChatModal';
 import { Footer } from '../Footer/Footer';
+import { useFederatedServers } from '../../../hooks/useFederatedServers';
 
 // Lazy loaded components
 const ChatContainer = dynamic(
@@ -44,14 +45,17 @@ const ChatContainer = dynamic(
   },
 );
 
+// The follow modal renders its own antd v6 modal shell (the first surface
+// migrated to v6), so it mounts nothing until opened; no loading skeleton.
 const FollowModal = dynamic(
   () => import('../../modals/FollowModal/FollowModal').then(mod => mod.FollowModal),
   {
     ssr: false,
-    loading: () => <Skeleton loading active paragraph={{ rows: 8 }} />,
   },
 );
 
+// The notify modal renders its own antd v6 modal shell; it mounts nothing
+// until opened, so no loading skeleton.
 const BrowserNotifyModal = dynamic(
   () =>
     import('../../modals/BrowserNotifyModal/BrowserNotifyModal').then(
@@ -59,7 +63,6 @@ const BrowserNotifyModal = dynamic(
     ),
   {
     ssr: false,
-    loading: () => <Skeleton loading active paragraph={{ rows: 6 }} />,
   },
 );
 
@@ -68,6 +71,13 @@ const OwncastPlayer = dynamic(
   {
     ssr: false,
     loading: () => <Skeleton loading active paragraph={{ rows: 12 }} />,
+  },
+);
+
+const ChatModal = dynamic(
+  () => import('../../modals/ChatModal/ChatModal').then(mod => mod.ChatModal),
+  {
+    ssr: false,
   },
 );
 
@@ -97,18 +107,20 @@ const ExternalModal = ({ externalActionToDisplay, setExternalActionToDisplay }) 
 };
 
 export const Content: FC = () => {
-  const appState = useRecoilValue<AppStateOptions>(appStateAtom);
-  const clientConfig = useRecoilValue<ClientConfig>(clientConfigStateAtom);
-  const chatState = useRecoilValue<ChatState>(chatStateAtom);
-  const currentUser = useRecoilValue(currentUserAtom);
-  const serverStatus = useRecoilValue<ServerStatus>(serverStatusState);
-  const [isMobile, setIsMobile] = useRecoilState<boolean | undefined>(isMobileAtom);
-  const messages = useRecoilValue<ChatMessage[]>(visibleChatMessagesSelector);
-  const online = useRecoilValue<boolean>(isOnlineSelector);
-  const isChatAvailable = useRecoilValue<boolean>(isChatAvailableSelector);
+  const { t } = useTranslation();
+  const appState = useAtomValue(appStateAtom);
+  const clientConfig = useAtomValue(clientConfigStateAtom);
+  const chatState = useAtomValue(chatStateAtom);
+  const currentUser = useAtomValue(currentUserAtom);
+  const serverStatus = useAtomValue(serverStatusState);
+  const [isMobile, setIsMobile] = useAtom(isMobileAtom);
+  const messages = useAtomValue(visibleChatMessagesSelector);
+  const online = useAtomValue(isOnlineSelector);
+  const configLoaded = useAtomValue(isClientConfigLoadedAtom);
+  const isChatAvailable = useAtomValue(isChatAvailableSelector);
+  const isUserAuthenticated = useAtomValue(chatAuthenticatedAtom);
 
-  const { viewerCount, lastConnectTime, lastDisconnectTime, streamTitle } =
-    useRecoilValue<ServerStatus>(serverStatusState);
+  const { viewerCount, lastConnectTime, lastDisconnectTime, streamTitle } = serverStatus;
   const {
     extraPageContent,
     name,
@@ -118,13 +130,16 @@ export const Content: FC = () => {
     externalActions,
     offlineMessage,
     chatDisabled,
+    chatRequireAuthentication,
     federation,
     notifications,
+    pluginTabs,
+    autoplay,
   } = clientConfig;
   const [showNotifyReminder, setShowNotifyReminder] = useState(false);
   const [showNotifyModal, setShowNotifyModal] = useState(false);
   const [showFollowModal, setShowFollowModal] = useState(false);
-  const { account: fediverseAccount, enabled: fediverseEnabled } = federation;
+  const { account: fediverseAccount, enabled: fediverseEnabled, hideFollowersTab } = federation;
   const { browser: browserNotifications } = notifications;
   const { enabled: browserNotificationsEnabled } = browserNotifications;
   const { online: isStreamLive } = serverStatus;
@@ -133,6 +148,12 @@ export const Content: FC = () => {
 
   const [supportsBrowserNotifications, setSupportsBrowserNotifications] = useState(false);
   const supportFediverseFeatures = fediverseEnabled;
+  // The Followers tab can be hidden independently of the rest of the
+  // social features: federation stays on (follow button, go-live posts,
+  // engagement) but the public followers list is not shown.
+  const showFollowersTab = fediverseEnabled && !hideFollowersTab;
+  const { servers: federatedServers } = useFederatedServers();
+  const recommendedServer = federatedServers.find(server => server.isOnline);
 
   const [showChatModal, setShowChatModal] = useState(false);
 
@@ -140,14 +161,21 @@ export const Content: FC = () => {
     const { openExternally, url } = action;
 
     if (url) {
-      const updatedUrl = new URL(url);
+      // Plugin-contributed actions can use root-relative URLs (e.g.
+      // "/plugins/<name>/") that the host validates and rewrites. Pass
+      // window.location.origin as the base so URL() accepts both
+      // absolute external URLs and same-origin plugin paths.
+      const updatedUrl = new URL(url, window.location.origin);
       updatedUrl.searchParams.append('instance', currentBrowserWindowUrl);
 
       if (currentUser) {
-        const { displayName } = currentUser;
+        const { id, displayName } = currentUser;
 
-        // Append url and username to params so the link knows where we came from and who we are.
+        // Append url, username and userId to params so the link knows where we
+        // came from and who we are. Display names are not unique, so userId
+        // gives external actions a stable identifier for the chat user.
         updatedUrl.searchParams.append('username', displayName);
+        updatedUrl.searchParams.append('userId', id);
       }
       const fullUrl = updatedUrl.toString();
       // Overwrite URL with the updated one that includes the params.
@@ -219,6 +247,16 @@ export const Content: FC = () => {
 
   const showChat = isChatAvailable && !chatDisabled && chatState === ChatState.VISIBLE;
 
+  // Determine if chat input should be enabled based on authentication requirements.
+  // Moderators bypass the authentication requirement.
+  const chatInputEnabled = !!(
+    isChatAvailable &&
+    (!chatRequireAuthentication || isUserAuthenticated || currentUser?.isModerator)
+  );
+  const chatInputDisabledMessage = chatRequireAuthentication
+    ? t(Localization.Frontend.Chat.authenticateToChat)
+    : t(Localization.Frontend.chatDisabled);
+
   return (
     <div className={styles.main}>
       <div className={styles.mainColumn}>
@@ -231,27 +269,44 @@ export const Content: FC = () => {
           </div>
         )}
         <Row>
-          {online && (
+          {online && configLoaded && (
             <OwncastPlayer
               source="/hls/stream.m3u8"
               online={online}
               title={streamTitle || name}
+              autoplay={autoplay}
               className={styles.topSectionElement}
             />
           )}
           {!online && !appState.appLoading && (
-            <div id="offline-message" style={{ width: '100%' }}>
-              <OfflineBanner
-                showsHeader={false}
-                streamName={name}
-                customText={offlineMessage}
-                notificationsEnabled={supportsBrowserNotifications}
-                fediverseAccount={fediverseAccount}
-                lastLive={lastDisconnectTime}
-                onNotifyClick={() => setShowNotifyModal(true)}
-                onFollowClick={() => setShowFollowModal(true)}
-                className={classnames([styles.topSectionElement, styles.offlineBanner])}
-              />
+            <div
+              id="offline-message"
+              className={classnames(styles.offlineSection, {
+                [styles.topSectionElement]: !!recommendedServer,
+              })}
+            >
+              <div
+                className={classnames({
+                  [styles.offlineRecommendationLayout]: !!recommendedServer,
+                })}
+              >
+                <OfflineBanner
+                  showsHeader={false}
+                  streamName={name}
+                  customText={offlineMessage}
+                  notificationsEnabled={supportsBrowserNotifications}
+                  fediverseAccount={fediverseAccount}
+                  lastLive={lastDisconnectTime}
+                  onNotifyClick={() => setShowNotifyModal(true)}
+                  onFollowClick={() => setShowFollowModal(true)}
+                  className={classnames(styles.offlineBanner, {
+                    [styles.topSectionElement]: !recommendedServer,
+                  })}
+                />
+                {recommendedServer && (
+                  <OfflineRecommendation localStreamName={name} server={recommendedServer} />
+                )}
+              </div>
             </div>
           )}
         </Row>
@@ -274,20 +329,17 @@ export const Content: FC = () => {
             setShowNotifyModal={setShowNotifyModal}
             disableNotifyReminderPopup={disableNotifyReminderPopup}
             externalActions={externalActions || []}
-            setExternalActionToDisplay={setExternalActionToDisplay}
             setShowFollowModal={setShowFollowModal}
             externalActionSelected={externalActionSelected}
           />
         </Row>
 
-        <Modal
-          title="Browser Notifications"
-          open={showNotifyModal}
-          afterClose={() => disableNotifyReminderPopup()}
-          handleCancel={() => disableNotifyReminderPopup()}
-        >
-          <BrowserNotifyModal />
-        </Modal>
+        {showNotifyModal && (
+          <BrowserNotifyModal
+            open={showNotifyModal}
+            handleClose={() => disableNotifyReminderPopup()}
+          />
+        )}
         <Row>
           {!name && <Skeleton active loading style={{ marginLeft: '10vw', marginRight: '10vw' }} />}
           {isMobile ? (
@@ -297,9 +349,11 @@ export const Content: FC = () => {
               tags={tags}
               socialHandles={socialHandles}
               extraPageContent={extraPageContent}
+              pluginTabs={pluginTabs}
               setShowFollowModal={setShowFollowModal}
-              supportFediverseFeatures={supportFediverseFeatures}
+              showFollowersTab={showFollowersTab}
               online={online}
+              federatedServers={federatedServers}
             />
           ) : (
             <div className={desktopStyles.bottomSectionContent}>
@@ -309,8 +363,10 @@ export const Content: FC = () => {
                 tags={tags}
                 socialHandles={socialHandles}
                 extraPageContent={extraPageContent}
+                pluginTabs={pluginTabs}
                 setShowFollowModal={setShowFollowModal}
-                supportFediverseFeatures={supportFediverseFeatures}
+                showFollowersTab={showFollowersTab}
+                federatedServers={federatedServers}
               />
             </div>
           )}
@@ -326,6 +382,8 @@ export const Content: FC = () => {
           isModerator={currentUser.isModerator}
           chatAvailable={isChatAvailable}
           showInput={!!currentUser}
+          inputEnabled={chatInputEnabled}
+          inputDisabledPlaceholder={chatInputDisabledMessage}
           desktop
         />
       )}
@@ -335,23 +393,21 @@ export const Content: FC = () => {
           setExternalActionToDisplay={setExternalActionToDisplay}
         />
       )}
-      <Modal
-        title={`Follow ${name}`}
-        open={showFollowModal}
-        handleCancel={() => setShowFollowModal(false)}
-        width="550px"
-      >
+      {showFollowModal && (
         <FollowModal
+          open={showFollowModal}
           account={fediverseAccount}
           name={name}
           handleClose={() => setShowFollowModal(false)}
         />
-      </Modal>
+      )}
       {isMobile && showChatModal && chatState === ChatState.VISIBLE && (
         <ChatModal
           messages={messages}
           currentUser={currentUser}
           handleClose={() => setShowChatModal(false)}
+          inputEnabled={chatInputEnabled}
+          inputDisabledPlaceholder={chatInputDisabledMessage}
         />
       )}
       {isMobile && isChatAvailable && !chatDisabled && (

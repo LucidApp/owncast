@@ -1,0 +1,288 @@
+name: ActivityPub Tests
+
+on:
+  push:
+    branches:
+      - develop
+    paths:
+      - "services/activitypub/**"
+      - "services/chat/**"
+      - "config/**"
+      - "main.go"
+      - "go.mod"
+      - "go.sum"
+      - "webserver/**"
+      - "auth/**"
+      - "persistence/**"
+      - "test/automated/activitypub/**"
+      - ".github/workflows/activitypub-tests.yaml"
+  pull_request:
+    paths:
+      - "services/activitypub/**"
+      - "services/chat/**"
+      - "config/**"
+      - "main.go"
+      - "go.mod"
+      - "go.sum"
+      - "webserver/**"
+      - "auth/**"
+      - "persistence/**"
+      - "test/automated/activitypub/**"
+      - ".github/workflows/activitypub-tests.yaml"
+
+jobs:
+  federation-test:
+    runs-on: ubuntu-latest
+    steps:
+      - id: skip_check
+        uses: fkirc/skip-duplicate-actions@v5
+        with:
+          concurrent_skipping: "same_content_newer"
+
+      - name: Check out repository code
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.5"
+          cache: true
+
+      - name: Install Caddy
+        run: |
+          curl -sfL https://github.com/caddyserver/caddy/releases/download/v2.11.7/caddy_2.11.7_linux_amd64.tar.gz -o caddy.tar.gz
+          tar -xzf caddy.tar.gz caddy
+          sudo mv caddy /usr/local/bin/caddy
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get install -y snac2 ffmpeg
+
+      - name: Run setup
+        env:
+          # Authenticates the mkcert download in setup.sh against github.com
+          # to avoid the anonymous, shared-per-IP rate limit on CI runners.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd test/automated/activitypub
+          # Preserve GITHUB_TOKEN across sudo (sudo strips env by default) so
+          # setup.sh's github.com downloads use it.
+          sudo --preserve-env=GITHUB_TOKEN ./setup.sh
+
+      - name: Run federation test
+        run: |
+          cd test/automated/activitypub
+          CI=true USER_COUNT=20 ./test-federation.sh
+
+  chat-sanitization-test:
+    runs-on: ubuntu-latest
+    steps:
+      - id: skip_check
+        uses: fkirc/skip-duplicate-actions@v5
+        with:
+          concurrent_skipping: "same_content_newer"
+
+      - name: Check out repository code
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.5"
+          cache: true
+
+      - name: Install Caddy
+        run: |
+          curl -sfL https://github.com/caddyserver/caddy/releases/download/v2.11.7/caddy_2.11.7_linux_amd64.tar.gz -o caddy.tar.gz
+          tar -xzf caddy.tar.gz caddy
+          sudo mv caddy /usr/local/bin/caddy
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get install -y snac2 ffmpeg
+
+      - name: Run setup
+        env:
+          # Authenticates the mkcert download in setup.sh against github.com
+          # to avoid the anonymous, shared-per-IP rate limit on CI runners.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd test/automated/activitypub
+          # Preserve GITHUB_TOKEN across sudo (sudo strips env by default) so
+          # setup.sh's github.com downloads use it.
+          sudo --preserve-env=GITHUB_TOKEN ./setup.sh
+
+      - name: Run chat sanitization test
+        run: |
+          cd test/automated/activitypub
+          CI=true ./test-chat-sanitization.sh
+
+  follower-validation-test:
+    runs-on: ubuntu-latest
+    steps:
+      - id: skip_check
+        uses: fkirc/skip-duplicate-actions@v5
+        with:
+          concurrent_skipping: "same_content_newer"
+
+      - name: Check out repository code
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.5"
+          cache: true
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sqlite3 ffmpeg jq
+
+      - name: Run follower validation test
+        timeout-minutes: 15
+        run: |
+          cd test/automated/activitypub
+          ./test-follower-validation.sh
+
+  featured-streams-test:
+    runs-on: ubuntu-latest
+    steps:
+      - id: skip_check
+        uses: fkirc/skip-duplicate-actions@v5
+        with:
+          concurrent_skipping: "same_content_newer"
+
+      - name: Check out repository code
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.5"
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24.12.0"
+          cache: "npm"
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install Caddy
+        run: |
+          curl -sfL https://github.com/caddyserver/caddy/releases/download/v2.11.7/caddy_2.11.7_linux_amd64.tar.gz -o caddy.tar.gz
+          tar -xzf caddy.tar.gz caddy
+          sudo mv caddy /usr/local/bin/caddy
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get install -y snac2 ffmpeg jq
+          npm ci --prefix web --ignore-scripts
+
+      - name: Run setup
+        env:
+          # Authenticates the mkcert download in setup.sh against github.com
+          # to avoid the anonymous, shared-per-IP rate limit on CI runners.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd test/automated/activitypub
+          # Preserve GITHUB_TOKEN across sudo (sudo strips env by default) so
+          # setup.sh's github.com downloads use it.
+          sudo --preserve-env=GITHUB_TOKEN ./setup.sh
+
+      - name: Run featured streams test
+        timeout-minutes: 15
+        run: |
+          cd test/automated/activitypub
+          CI=true ./test-featured-streams.sh
+
+  fediverse-auth-test:
+    runs-on: ubuntu-latest
+    steps:
+      - id: skip_check
+        uses: fkirc/skip-duplicate-actions@v5
+        with:
+          concurrent_skipping: "same_content_newer"
+
+      - name: Check out repository code
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.5"
+          cache: true
+
+      - name: Install Caddy
+        run: |
+          curl -sfL https://github.com/caddyserver/caddy/releases/download/v2.11.7/caddy_2.11.7_linux_amd64.tar.gz -o caddy.tar.gz
+          tar -xzf caddy.tar.gz caddy
+          sudo mv caddy /usr/local/bin/caddy
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get install -y snac2 ffmpeg jq
+
+      - name: Run setup
+        env:
+          # Authenticates the mkcert download in setup.sh against github.com
+          # to avoid the anonymous, shared-per-IP rate limit on CI runners.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd test/automated/activitypub
+          # Preserve GITHUB_TOKEN across sudo (sudo strips env by default) so
+          # setup.sh's github.com downloads use it.
+          sudo --preserve-env=GITHUB_TOKEN ./setup.sh
+
+      - name: Run Fediverse OTP auth test
+        timeout-minutes: 15
+        run: |
+          cd test/automated/activitypub
+          CI=true ./test-fediverse-otp.sh
+
+  indieauth-auth-test:
+    runs-on: ubuntu-latest
+    steps:
+      - id: skip_check
+        uses: fkirc/skip-duplicate-actions@v5
+        with:
+          concurrent_skipping: "same_content_newer"
+
+      - name: Check out repository code
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.5"
+          cache: true
+
+      - name: Install Caddy
+        run: |
+          curl -sfL https://github.com/caddyserver/caddy/releases/download/v2.11.7/caddy_2.11.7_linux_amd64.tar.gz -o caddy.tar.gz
+          tar -xzf caddy.tar.gz caddy
+          sudo mv caddy /usr/local/bin/caddy
+
+      - name: Install dependencies
+        run: |
+          # snac2 is installed so setup.sh's dependency check is satisfied; the
+          # IndieAuth test itself only needs Caddy + jq (no federation peer).
+          sudo apt-get install -y snac2 ffmpeg jq
+
+      - name: Run setup
+        env:
+          # Authenticates the mkcert download in setup.sh against github.com
+          # to avoid the anonymous, shared-per-IP rate limit on CI runners.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd test/automated/activitypub
+          # Preserve GITHUB_TOKEN across sudo (sudo strips env by default) so
+          # setup.sh's github.com downloads use it.
+          sudo --preserve-env=GITHUB_TOKEN ./setup.sh
+
+      - name: Run IndieAuth auth test
+        timeout-minutes: 15
+        run: |
+          cd test/automated/activitypub
+          CI=true ./test-indieauth.sh

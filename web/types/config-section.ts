@@ -1,3 +1,4 @@
+import { AutoplaySetting } from '../utils/autoplay';
 // TS types for elements on the Config pages
 
 // for dropdown
@@ -34,6 +35,7 @@ export interface ConfigInstanceDetailsFields {
   logo: string;
   name: string;
   nsfw: boolean;
+  autoplay: AutoplaySetting;
   socialHandles: SocialHandle[];
   streamTitle: string;
   summary: string;
@@ -96,12 +98,27 @@ export interface ExternalAction {
   openExternally: boolean;
 }
 
+// PluginStyleInfo describes the page styling one enabled plugin
+// contributes. The Appearance config uses it to tell the admin that
+// plugin styles are combined with their own colors, and to flag the
+// swatches a plugin also sets. declaredVars holds the theme custom
+// properties the plugin declares (without the leading `--`, e.g.
+// "theme-color-action"); it can be empty when a plugin styles the page
+// without touching a recognized appearance token.
+export interface PluginStyleInfo {
+  slug: string;
+  name: string;
+  declaredVars: string[];
+}
+
 export interface Federation {
   enabled: boolean;
   isPrivate: boolean;
   username: string;
   goLiveMessage: string;
   showEngagement: boolean;
+  enableQuotes: boolean;
+  hideFollowersTab: boolean;
   blockedDomains: string[];
 }
 
@@ -135,9 +152,11 @@ export interface StreamKey {
 
 export interface ConfigDetails {
   externalActions: ExternalAction[];
+  styleContributors: PluginStyleInfo[];
   ffmpegPath: string;
   instanceDetails: ConfigInstanceDetailsFields;
   rtmpServerPort: string;
+  rtmpServerAddress: string;
   s3: S3Field;
   streamKeys: StreamKey[];
   streamKeyOverridden: boolean;
@@ -154,6 +173,7 @@ export interface ConfigDetails {
   chatDisabled: boolean;
   chatSpamProtectionEnabled: boolean;
   chatSlurFilterEnabled: boolean;
+  chatRequireAuthentication: boolean;
   federation: Federation;
   notifications: NotificationsConfig;
   chatJoinMessagesEnabled: boolean;

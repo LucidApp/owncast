@@ -1,11 +1,23 @@
-import { StoryFn, Meta } from '@storybook/react';
-import { action } from '@storybook/addon-actions';
+import { StoryFn, Meta } from '@storybook/nextjs';
+import { action } from 'storybook/actions';
 import { ActionButtonMenu } from './ActionButtonMenu';
 
 const meta = {
   title: 'owncast/Components/Action Buttons/Action Menu',
   component: ActionButtonMenu,
   parameters: {},
+  decorators: [
+    Story => (
+      <>
+        {/* The component sizes itself to its parent (height 100%), which in
+            the app is the fixed-height action button row. Standalone it
+            collapses to its content, so mirror the row here. */}
+        <div style={{ height: 40, display: 'flex' }}>
+          <Story />
+        </div>
+      </>
+    ),
+  ],
 } satisfies Meta<typeof ActionButtonMenu>;
 
 export default meta;

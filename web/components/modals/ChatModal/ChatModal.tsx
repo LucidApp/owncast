@@ -1,6 +1,6 @@
 import { Modal } from 'antd';
 import { FC } from 'react';
-import { ErrorBoundary } from 'react-error-boundary';
+import { ErrorBoundary, getErrorMessage } from 'react-error-boundary';
 
 import styles from './ChatModal.module.scss';
 
@@ -14,9 +14,17 @@ export type ChatModalProps = {
   messages: ChatMessage[];
   currentUser: CurrentUser;
   handleClose: () => void;
+  inputEnabled?: boolean;
+  inputDisabledPlaceholder?: string;
 };
 
-export const ChatModal: FC<ChatModalProps> = ({ messages, currentUser, handleClose }) => {
+export const ChatModal: FC<ChatModalProps> = ({
+  messages,
+  currentUser,
+  handleClose,
+  inputEnabled = true,
+  inputDisabledPlaceholder,
+}) => {
   if (!currentUser) {
     return null;
   }
@@ -33,7 +41,7 @@ export const ChatModal: FC<ChatModalProps> = ({ messages, currentUser, handleClo
       fallbackRender={({ error, resetErrorBoundary }) => (
         <ComponentError
           componentName="ChatModal"
-          message={error.message}
+          message={getErrorMessage(error)}
           retryFunction={resetErrorBoundary}
         />
       )}
@@ -58,6 +66,8 @@ export const ChatModal: FC<ChatModalProps> = ({ messages, currentUser, handleClo
           chatUserId={id}
           isModerator={isModerator}
           chatAvailable
+          inputEnabled={inputEnabled}
+          inputDisabledPlaceholder={inputDisabledPlaceholder}
           focusInput={false}
         />
       </Modal>

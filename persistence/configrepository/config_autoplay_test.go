@@ -1,0 +1,44 @@
+package configrepository
+
+import (
+	"os"
+	"testing"
+
+	"github.com/owncast/owncast/models"
+	"github.com/owncast/owncast/services/datastore"
+)
+
+func newAutoplayTestRepo(t *testing.T) ConfigRepository {
+	t.Helper()
+	ds, err := datastore.SetupPersistence(":memory:", os.TempDir())
+	if err != nil {
+		t.Fatalf("failed to set up datastore: %v", err)
+	}
+	return New(ds)
+}
+
+func TestGetAutoplayDefaultsToOff(t *testing.T) {
+	repo := newAutoplayTestRepo(t)
+	if got := repo.GetAutoplay(); got != models.AutoplayOff {
+		t.Errorf("expected default autoplay 'off' on an unset key, got %q", got)
+	}
+}
+
+func TestSetAndGetAutoplayRoundTrip(t *testing.T) {
+	repo := newAutoplayTestRepo(t)
+	for _, value := range []models.AutoplayMode{models.AutoplayAlways, models.AutoplaySoundOnly, models.AutoplayOff} {
+		if err := repo.SetAutoplay(value); err != nil {
+			t.Fatalf("SetAutoplay(%q) returned error: %v", value, err)
+		}
+		if got := repo.GetAutoplay(); got != value {
+			t.Errorf("after SetAutoplay(%q), GetAutoplay() = %q", value, got)
+		}
+	}
+}
+
+func TestSetAutoplayRejectsInvalidValue(t *testing.T) {
+	repo := newAutoplayTestRepo(t)
+	if err := repo.SetAutoplay(models.AutoplayMode("invalid")); err == nil {
+		t.Fatal("expected invalid autoplay value to be rejected")
+	}
+}

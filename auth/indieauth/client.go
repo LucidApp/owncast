@@ -8,69 +8,33 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/owncast/owncast/persistence/configrepository"
-	"github.com/owncast/owncast/utils"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
+
+	"github.com/owncast/owncast/utils"
 )
-
-var (
-	pendingAuthRequests = make(map[string]*Request)
-	lock                = sync.Mutex{}
-)
-
-const registrationTimeout = time.Minute * 10
-
-func init() {
-	go setupExpiredRequestPruner()
-}
-
-// Clear out any pending requests that have been pending for greater than
-// the specified timeout value.
-func setupExpiredRequestPruner() {
-	pruneExpiredRequestsTimer := time.NewTicker(registrationTimeout)
-
-	for range pruneExpiredRequestsTimer.C {
-		lock.Lock()
-		log.Debugln("Pruning expired IndieAuth requests.")
-		for k, v := range pendingAuthRequests {
-			if time.Since(v.Timestamp) > registrationTimeout {
-				delete(pendingAuthRequests, k)
-			}
-		}
-		lock.Unlock()
-	}
-}
 
 // StartAuthFlow will begin the IndieAuth flow by generating an auth request.
-func StartAuthFlow(authHost, userID, accessToken, displayName string) (*url.URL, error) {
-	configRepository := configrepository.Get()
-
-	// Limit the number of pending requests
-	if len(pendingAuthRequests) >= maxPendingRequests {
-		return nil, errors.New("Please try again later. Too many pending requests.")
-	}
-
-	// Reject any requests to our internal network or loopback
-	if utils.IsHostnameInternal(authHost) {
-		return nil, errors.New("unable to use provided host")
-	}
-
-	// Santity check the server URL
+func (s *Service) StartAuthFlow(authHost, userID, accessToken, displayName string) (*url.URL, error) {
+	// Sanity check the server URL.
 	u, err := url.ParseRequestURI(authHost)
 	if err != nil {
 		return nil, errors.New("unable to parse server URL")
 	}
 
+	// Reject any requests to our internal network or loopback.
+	if utils.IsHostnameInternal(u.Hostname()) {
+		return nil, errors.New("unable to use provided host")
+	}
+
 	// Limit to only secured connections
-	if u.Scheme != "https" {
+	if u.Scheme != schemeHTTPS {
 		return nil, errors.New("only servers secured with https are supported")
 	}
 
-	serverURL := configRepository.GetServerURL()
+	serverURL := s.configRepository.GetServerURL()
 	if serverURL == "" {
 		return nil, errors.New("Owncast server URL must be set when using auth")
 	}
@@ -80,17 +44,22 @@ func StartAuthFlow(authHost, userID, accessToken, displayName string) (*url.URL,
 		return nil, errors.Wrap(err, "unable to generate IndieAuth request")
 	}
 
-	pendingAuthRequests[r.State] = r
+	if err := s.storePendingAuthRequest(r); err != nil {
+		return nil, err
+	}
 
 	return r.Redirect, nil
 }
 
 // HandleCallbackCode will handle the callback from the IndieAuth server
 // to continue the next step of the auth flow.
-func HandleCallbackCode(code, state string) (*Request, *Response, error) {
-	request, exists := pendingAuthRequests[state]
+func (s *Service) HandleCallbackCode(code, state string) (*Request, *Response, error) {
+	request, exists := s.takePendingAuthRequest(state)
 	if !exists {
 		return nil, nil, errors.New("no auth requests pending")
+	}
+	if time.Since(request.Timestamp) > registrationTimeout {
+		return nil, nil, errors.New("auth request has expired")
 	}
 
 	data := url.Values{}
@@ -100,11 +69,9 @@ func HandleCallbackCode(code, state string) (*Request, *Response, error) {
 	data.Set("redirect_uri", request.Callback.String())
 	data.Set("code_verifier", request.CodeVerifier)
 
-	// Do not support redirects.
-	client := &http.Client{
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
+	client := utils.GetFederationHTTPClient()
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
 	}
 
 	r, err := http.NewRequest("POST", request.Endpoint.String(), strings.NewReader(data.Encode())) // URL-encoded payload
@@ -167,4 +134,25 @@ func makeIndieAuthClientErrorText(err string) string {
 	default:
 		return err
 	}
+}
+
+func (s *Service) storePendingAuthRequest(request *Request) error {
+	s.pendingAuthRequestsLock.Lock()
+	defer s.pendingAuthRequestsLock.Unlock()
+
+	if len(s.pendingAuthRequests) >= maxPendingRequests {
+		return errors.New("Please try again later. Too many pending requests.")
+	}
+	s.pendingAuthRequests[request.State] = request
+	return nil
+}
+
+func (s *Service) takePendingAuthRequest(state string) (*Request, bool) {
+	s.pendingAuthRequestsLock.Lock()
+	defer s.pendingAuthRequestsLock.Unlock()
+	request, exists := s.pendingAuthRequests[state]
+	if exists {
+		delete(s.pendingAuthRequests, state)
+	}
+	return request, exists
 }

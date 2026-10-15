@@ -9,13 +9,14 @@ import (
 	"time"
 
 	"github.com/owncast/owncast/config"
-	"github.com/owncast/owncast/core/data"
 	"github.com/owncast/owncast/db"
+	"github.com/owncast/owncast/services/datastore"
+
+	"github.com/pkg/errors"
+	"github.com/teris-io/shortid"
 
 	"github.com/owncast/owncast/models"
 	"github.com/owncast/owncast/utils"
-	"github.com/pkg/errors"
-	"github.com/teris-io/shortid"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -26,6 +27,9 @@ type UserRepository interface {
 	CreateAnonymousUser(displayName string) (*models.User, string, error)
 	DeleteExternalAPIUser(token string) error
 	GetDisabledUsers() []*models.User
+	GetUsers() []*models.User
+	GetUsersPaginated(offset int, limit int, search string, status string, sort string) ([]*models.User, int, error)
+	DeleteUser(userID string) error
 	GetExternalAPIUser() ([]models.ExternalAPIUser, error)
 	GetExternalAPIUserForAccessTokenAndScope(token string, scope string) (*models.ExternalAPIUser, error)
 	GetModeratorUsers() []*models.User
@@ -34,34 +38,26 @@ type UserRepository interface {
 	InsertExternalAPIUser(token string, name string, color int, scopes []string) error
 	IsDisplayNameAvailable(displayName string) (bool, error)
 	SetAccessTokenToOwner(token, userID string) error
-	SetEnabled(userID string, enabled bool) error
+	SetEnabled(userID string, enabled bool, reason string) error
 	SetModerator(userID string, isModerator bool) error
 	SetUserAsAuthenticated(userID string) error
 	HasValidScopes(scopes []string) bool
 	GetUserByAuth(authToken string, authType models.AuthType) *models.User
-	AddAuth(userID, authToken string, authType models.AuthType) error
+	GetUserByPluginAuth(pluginName, authKey string) *models.User
+	AddAuth(userID, authKey string, authType models.AuthType, fields *models.LinkedIdentityFields) error
+	UserRegisteredByPlugin(pluginName, userID string) bool
+	AddAccessTokenForUser(accessToken, userID string) error
+	SetUserScopes(userID string, scopes []string) error
 	SetExternalAPIUserAccessTokenAsUsed(token string) error
 	GetUsersCount() int
 }
 
 type SqlUserRepository struct {
-	datastore *data.Datastore
-}
-
-// NOTE: This is temporary during the transition period.
-var temporaryGlobalInstance UserRepository
-
-// Get will return the user repository.
-func Get() UserRepository {
-	if temporaryGlobalInstance == nil {
-		i := New(data.GetDatastore())
-		temporaryGlobalInstance = i
-	}
-	return temporaryGlobalInstance
+	datastore *datastore.Datastore
 }
 
 // New will create a new instance of the UserRepository.
-func New(datastore *data.Datastore) UserRepository {
+func New(datastore *datastore.Datastore) UserRepository {
 	r := SqlUserRepository{
 		datastore: datastore,
 	}
@@ -144,7 +140,7 @@ func (r *SqlUserRepository) ChangeUserColor(userID string, color int) error {
 	defer r.datastore.DbLock.Unlock()
 
 	if err := r.datastore.GetQueries().ChangeDisplayColor(context.Background(), db.ChangeDisplayColorParams{
-		DisplayColor: color,
+		DisplayColor: int64(color),
 		ID:           userID,
 	}); err != nil {
 		return errors.Wrap(err, "unable to change display color")
@@ -158,6 +154,12 @@ func (r *SqlUserRepository) addAccessTokenForUser(accessToken, userID string) er
 		Token:  accessToken,
 		UserID: userID,
 	})
+}
+
+// AddAccessTokenForUser associates a new access token with an existing user.
+// Used by the viewer-auth gate to mint a session token the gate cookie carries.
+func (r *SqlUserRepository) AddAccessTokenForUser(accessToken, userID string) error {
+	return r.addAccessTokenForUser(accessToken, userID)
 }
 
 func (r *SqlUserRepository) create(user *models.User) error {
@@ -188,7 +190,7 @@ func (r *SqlUserRepository) create(user *models.User) error {
 }
 
 // SetEnabled will set the enabled status of a single user by ID.
-func (r *SqlUserRepository) SetEnabled(userID string, enabled bool) error {
+func (r *SqlUserRepository) SetEnabled(userID string, enabled bool, reason string) error {
 	r.datastore.DbLock.Lock()
 	defer r.datastore.DbLock.Unlock()
 
@@ -201,9 +203,9 @@ func (r *SqlUserRepository) SetEnabled(userID string, enabled bool) error {
 
 	var stmt *sql.Stmt
 	if !enabled {
-		stmt, err = tx.Prepare("UPDATE users SET disabled_at=DATETIME('now', 'localtime') WHERE id IS ?")
+		stmt, err = tx.Prepare("UPDATE users SET disabled_at=DATETIME('now', 'localtime'), disabled_reason=? WHERE id IS ?")
 	} else {
-		stmt, err = tx.Prepare("UPDATE users SET disabled_at=null WHERE id IS ?")
+		stmt, err = tx.Prepare("UPDATE users SET disabled_at=null, disabled_reason=null WHERE id IS ?")
 	}
 
 	if err != nil {
@@ -212,11 +214,60 @@ func (r *SqlUserRepository) SetEnabled(userID string, enabled bool) error {
 
 	defer stmt.Close()
 
-	if _, err := stmt.Exec(userID); err != nil {
+	if !enabled {
+		_, err = stmt.Exec(reason, userID)
+	} else {
+		_, err = stmt.Exec(userID)
+	}
+	if err != nil {
 		return err
 	}
 
 	return tx.Commit()
+}
+
+// userFromColumns builds a *models.User from the column set shared by the
+// sqlc user lookups (GetUserByAccessToken, GetUserByID, GetUsers). IsBot is
+// derived in SQL (users.type = 'API') so callers don't second-guess it.
+func userFromColumns(
+	id, displayName string,
+	displayColor int64,
+	createdAt, disabledAt sql.NullTime,
+	disabledReason sql.NullString,
+	previousNames sql.NullString,
+	namechangedAt, authenticatedAt sql.NullTime,
+	scopes sql.NullString,
+	isBot bool,
+) *models.User {
+	var scopeSlice []string
+	if scopes.Valid {
+		scopeSlice = strings.Split(scopes.String, ",")
+	}
+
+	var disabled *time.Time
+	if disabledAt.Valid {
+		disabled = &disabledAt.Time
+	}
+
+	var authAt *time.Time
+	if authenticatedAt.Valid {
+		authAt = &authenticatedAt.Time
+	}
+
+	return &models.User{
+		ID:              id,
+		DisplayName:     displayName,
+		DisplayColor:    int(displayColor),
+		CreatedAt:       createdAt.Time,
+		DisabledAt:      disabled,
+		DisabledReason:  disabledReason.String,
+		PreviousNames:   strings.Split(previousNames.String, ","),
+		NameChangedAt:   &namechangedAt.Time,
+		AuthenticatedAt: authAt,
+		Authenticated:   authAt != nil,
+		Scopes:          scopeSlice,
+		IsBot:           isBot,
+	}
 }
 
 // GetUserByToken will return a user by an access token.
@@ -225,34 +276,7 @@ func (r *SqlUserRepository) GetUserByToken(token string) *models.User {
 	if err != nil {
 		return nil
 	}
-
-	var scopes []string
-	if u.Scopes.Valid {
-		scopes = strings.Split(u.Scopes.String, ",")
-	}
-
-	var disabledAt *time.Time
-	if u.DisabledAt.Valid {
-		disabledAt = &u.DisabledAt.Time
-	}
-
-	var authenticatedAt *time.Time
-	if u.AuthenticatedAt.Valid {
-		authenticatedAt = &u.AuthenticatedAt.Time
-	}
-
-	return &models.User{
-		ID:              u.ID,
-		DisplayName:     u.DisplayName,
-		DisplayColor:    int(u.DisplayColor),
-		CreatedAt:       u.CreatedAt.Time,
-		DisabledAt:      disabledAt,
-		PreviousNames:   strings.Split(u.PreviousNames.String, ","),
-		NameChangedAt:   &u.NamechangedAt.Time,
-		AuthenticatedAt: authenticatedAt,
-		Authenticated:   authenticatedAt != nil,
-		Scopes:          scopes,
-	}
+	return userFromColumns(u.ID, u.DisplayName, u.DisplayColor, u.CreatedAt, u.DisabledAt, u.DisabledReason, u.PreviousNames, u.NamechangedAt, u.AuthenticatedAt, u.Scopes, u.IsBot)
 }
 
 // SetAccessTokenToOwner will reassign an access token to be owned by a
@@ -270,42 +294,100 @@ func (r *SqlUserRepository) SetUserAsAuthenticated(userID string) error {
 	return errors.Wrap(r.datastore.GetQueries().SetUserAsAuthenticated(context.Background(), userID), "unable to set user as authenticated")
 }
 
-// AddAuth will add an external authentication token and type for a user.
-func (r *SqlUserRepository) AddAuth(userID, authToken string, authType models.AuthType) error {
+// AddAuth links an external authentication identity to a user. authKey is the
+// value matched at login (the IndieAuth/Fediverse identity, or a plugin's raw
+// external id). fields carries the optional linked-identity metadata (provider,
+// profile URL, handle, public consent) and may be nil for a bare identity, in
+// which case provider defaults to the auth type.
+func (r *SqlUserRepository) AddAuth(userID, authKey string, authType models.AuthType, fields *models.LinkedIdentityFields) error {
+	provider := string(authType)
+	var profileURL, handle sql.NullString
+	var isPublic bool
+	if fields != nil {
+		if fields.Provider != "" {
+			provider = fields.Provider
+		}
+		if fields.ProfileURL != "" {
+			profileURL = sql.NullString{String: fields.ProfileURL, Valid: true}
+		}
+		if fields.Handle != "" {
+			handle = sql.NullString{String: fields.Handle, Valid: true}
+		}
+		isPublic = fields.Public
+	}
+
 	return r.datastore.GetQueries().AddAuthForUser(context.Background(), db.AddAuthForUserParams{
-		UserID: userID,
-		Token:  authToken,
-		Type:   string(authType),
+		UserID:     userID,
+		AuthKey:    authKey,
+		Type:       string(authType),
+		Provider:   provider,
+		ProfileUrl: profileURL,
+		Handle:     handle,
+		IsPublic:   isPublic,
 	})
 }
 
+// UserRegisteredByPlugin reports whether userID belongs to a user the named
+// plugin registered via owncast.users.register — i.e. the user has a
+// plugin.auth identity whose provider is that plugin's slug. The viewer-auth
+// gate uses this to confine owncast.auth.grantSession to a plugin's own users,
+// so a gate plugin can't mint a session impersonating an arbitrary existing
+// user (e.g. a moderator).
+//
+// The match is an exact equality on (type='plugin.auth', provider=slug): type
+// keeps built-in identities out of reach even if a plugin's slug is "indieauth"
+// or "fediverse". Fails closed (returns false) on any query error.
+func (r *SqlUserRepository) UserRegisteredByPlugin(pluginName, userID string) bool {
+	count, err := r.datastore.GetQueries().CountUserAuthByProvider(context.Background(), db.CountUserAuthByProviderParams{
+		UserID:   userID,
+		Type:     string(models.PluginAuth),
+		Provider: pluginName,
+	})
+	if err != nil {
+		log.Errorln("checking plugin user ownership:", err)
+		return false
+	}
+	return count > 0
+}
+
 // GetUserByAuth will return an existing user given auth details if a user
-// has previously authenticated with that method.
+// has previously authenticated with that method. For built-in providers the
+// auth key (IndieAuth website / Fediverse handle) plus type uniquely identify
+// the row. Plugin auth must use GetUserByPluginAuth so the lookup is scoped to
+// the registering plugin's slug.
 func (r *SqlUserRepository) GetUserByAuth(authToken string, authType models.AuthType) *models.User {
 	u, err := r.datastore.GetQueries().GetUserByAuth(context.Background(), db.GetUserByAuthParams{
-		Token: authToken,
-		Type:  string(authType),
+		AuthKey: authToken,
+		Type:    string(authType),
 	})
 	if err != nil {
 		return nil
 	}
+	return userFromColumns(u.ID, u.DisplayName, u.DisplayColor, u.CreatedAt, u.DisabledAt, u.DisabledReason, u.PreviousNames, u.NamechangedAt, u.AuthenticatedAt, u.Scopes, false)
+}
 
-	var scopes []string
-	if u.Scopes.Valid {
-		scopes = strings.Split(u.Scopes.String, ",")
+// GetUserByPluginAuth returns the user a viewer-auth plugin registered for the
+// given raw external id, scoped to that plugin's slug. It is the find half of
+// owncast.users.register's find-or-create, and the (provider, auth_key) scoping
+// keeps two plugins that mint the same external id from resolving each other's
+// users.
+func (r *SqlUserRepository) GetUserByPluginAuth(pluginName, authKey string) *models.User {
+	u, err := r.datastore.GetQueries().GetUserByPluginAuth(context.Background(), db.GetUserByPluginAuthParams{
+		Provider: pluginName,
+		AuthKey:  authKey,
+	})
+	if err != nil {
+		return nil
 	}
+	return userFromColumns(u.ID, u.DisplayName, u.DisplayColor, u.CreatedAt, u.DisabledAt, u.DisabledReason, u.PreviousNames, u.NamechangedAt, u.AuthenticatedAt, u.Scopes, false)
+}
 
-	return &models.User{
-		ID:              u.ID,
-		DisplayName:     u.DisplayName,
-		DisplayColor:    int(u.DisplayColor),
-		CreatedAt:       u.CreatedAt.Time,
-		DisabledAt:      &u.DisabledAt.Time,
-		PreviousNames:   strings.Split(u.PreviousNames.String, ","),
-		NameChangedAt:   &u.NamechangedAt.Time,
-		AuthenticatedAt: &u.AuthenticatedAt.Time,
-		Scopes:          scopes,
-	}
+// SetUserScopes replaces a user's full scope set. Used by viewer-auth plugins
+// (owncast.users.register) to map an external provider's roles onto Owncast
+// scopes (e.g. granting MODERATOR). Callers should validate with
+// HasValidScopes first.
+func (r *SqlUserRepository) SetUserScopes(userID string, scopes []string) error {
+	return r.setScopesOnUser(userID, scopes)
 }
 
 // SetModerator will add or remove moderator status for a single user by ID.
@@ -378,21 +460,16 @@ func (r *SqlUserRepository) setScopesOnUser(userID string, scopes []string) erro
 
 // GetUserByID will return a user by a user ID.
 func (r *SqlUserRepository) GetUserByID(id string) *models.User {
-	r.datastore.DbLock.Lock()
-	defer r.datastore.DbLock.Unlock()
-
-	query := "SELECT id, display_name, display_color, created_at, disabled_at, previous_names, namechanged_at, scopes FROM users WHERE id = ?"
-	row := r.datastore.DB.QueryRow(query, id)
-	if row == nil {
-		log.Errorln(row)
+	u, err := r.datastore.GetQueries().GetUserByID(context.Background(), id)
+	if err != nil {
 		return nil
 	}
-	return r.getUserFromRow(row)
+	return userFromColumns(u.ID, u.DisplayName, u.DisplayColor, u.CreatedAt, u.DisabledAt, u.DisabledReason, u.PreviousNames, u.NamechangedAt, u.AuthenticatedAt, u.Scopes, u.IsBot)
 }
 
 // GetDisabledUsers will return back all the currently disabled users that are not API users.
 func (r *SqlUserRepository) GetDisabledUsers() []*models.User {
-	query := "SELECT id, display_name, scopes, display_color, created_at, disabled_at, previous_names, namechanged_at FROM users WHERE disabled_at IS NOT NULL AND type IS NOT 'API'"
+	query := "SELECT id, display_name, scopes, display_color, created_at, disabled_at, disabled_reason, previous_names, namechanged_at FROM users WHERE disabled_at IS NOT NULL AND type IS NOT 'API'"
 
 	rows, err := r.datastore.DB.Query(query)
 	if err != nil {
@@ -410,18 +487,196 @@ func (r *SqlUserRepository) GetDisabledUsers() []*models.User {
 	return users
 }
 
+// GetUsers will return all users, most-recently-created first.
+func (r *SqlUserRepository) GetUsers() []*models.User {
+	rows, err := r.datastore.GetQueries().GetUsers(context.Background())
+	if err != nil {
+		log.Errorln(err)
+		return nil
+	}
+
+	users := make([]*models.User, 0, len(rows))
+	for _, u := range rows {
+		users = append(users, userFromColumns(u.ID, u.DisplayName, u.DisplayColor, u.CreatedAt, u.DisabledAt, u.DisabledReason, u.PreviousNames, u.NamechangedAt, u.AuthenticatedAt, u.Scopes, u.IsBot))
+	}
+	return users
+}
+
+// GetUsersPaginated returns a page of users of every type (chat viewers,
+// authenticated/plugin users, and API integrations), filtered to display names
+// containing search and an optional status ("" / "all" = every user; else
+// "active", "banned", "moderators", "bots"). The page is ordered by creation
+// date: sort == "asc" is oldest-first, anything else is most-recently-created
+// first. It also returns the total number of users matching the filter so the
+// admin user-management page can paginate. The search arg is always Valid (even
+// when empty) so the LIKE binds to ” and matches every user rather than NULL.
+func (r *SqlUserRepository) GetUsersPaginated(offset int, limit int, search string, status string, sort string) ([]*models.User, int, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	ctx := context.Background()
+	searchArg := sql.NullString{String: search, Valid: true}
+
+	total, err := r.datastore.GetQueries().CountUsers(ctx, db.CountUsersParams{
+		Search: searchArg,
+		Status: status,
+	})
+	if err != nil {
+		return nil, 0, errors.Wrap(err, "unable to count users")
+	}
+
+	users := make([]*models.User, 0, limit)
+	if sort == "asc" {
+		rows, err := r.datastore.GetQueries().GetUsersPaginatedAsc(ctx, db.GetUsersPaginatedAscParams{
+			Search:     searchArg,
+			Status:     status,
+			PageLimit:  int64(limit),
+			PageOffset: int64(offset),
+		})
+		if err != nil {
+			return nil, 0, errors.Wrap(err, "unable to query users")
+		}
+		for _, u := range rows {
+			users = append(users, userFromColumns(u.ID, u.DisplayName, u.DisplayColor, u.CreatedAt, u.DisabledAt, u.DisabledReason, u.PreviousNames, u.NamechangedAt, u.AuthenticatedAt, u.Scopes, u.IsBot))
+		}
+	} else {
+		rows, err := r.datastore.GetQueries().GetUsersPaginated(ctx, db.GetUsersPaginatedParams{
+			Search:     searchArg,
+			Status:     status,
+			PageLimit:  int64(limit),
+			PageOffset: int64(offset),
+		})
+		if err != nil {
+			return nil, 0, errors.Wrap(err, "unable to query users")
+		}
+		for _, u := range rows {
+			users = append(users, userFromColumns(u.ID, u.DisplayName, u.DisplayColor, u.CreatedAt, u.DisabledAt, u.DisabledReason, u.PreviousNames, u.NamechangedAt, u.AuthenticatedAt, u.Scopes, u.IsBot))
+		}
+	}
+
+	if err := r.attachAuthProviders(ctx, users); err != nil {
+		return nil, 0, err
+	}
+
+	return users, int(total), nil
+}
+
+// attachAuthProviders fills each user's AuthProviders with friendly labels for
+// the external auth methods they signed in with (IndieAuth, Fediverse, or a
+// viewer-auth plugin's slug). One query covers the whole page; anonymous users
+// have no auth rows and are left with an empty slice.
+func (r *SqlUserRepository) attachAuthProviders(ctx context.Context, users []*models.User) error {
+	if len(users) == 0 {
+		return nil
+	}
+
+	ids := make([]string, 0, len(users))
+	for _, u := range users {
+		ids = append(ids, u.ID)
+	}
+
+	authRows, err := r.datastore.GetQueries().GetAuthForUsers(ctx, ids)
+	if err != nil {
+		return errors.Wrap(err, "unable to load user auth providers")
+	}
+
+	// Distinct provider labels per user id.
+	byUser := map[string][]string{}
+	seen := map[string]map[string]bool{}
+	for _, a := range authRows {
+		label := authProviderLabel(a.Type, a.Provider)
+		if seen[a.UserID] == nil {
+			seen[a.UserID] = map[string]bool{}
+		}
+		if seen[a.UserID][label] {
+			continue
+		}
+		seen[a.UserID][label] = true
+		byUser[a.UserID] = append(byUser[a.UserID], label)
+	}
+
+	for _, u := range users {
+		u.AuthProviders = byUser[u.ID]
+	}
+
+	return nil
+}
+
+// authProviderLabel turns an auth row into a human-friendly provider name. For
+// plugin auth the provider column holds the plugin slug, so the slug is
+// surfaced rather than the opaque "plugin.auth" type.
+func authProviderLabel(authType, provider string) string {
+	switch models.AuthType(authType) {
+	case models.IndieAuth:
+		return "IndieAuth"
+	case models.Fediverse:
+		return "Fediverse"
+	case models.PluginAuth:
+		if provider != "" {
+			return provider
+		}
+		return "Plugin"
+	default:
+		return authType
+	}
+}
+
+// DeleteUser permanently removes a user along with everything tied to their
+// identity: access tokens, external/plugin auth identities, and chat messages.
+// Unlike SetEnabled(false) (a reversible ban), this cannot be undone. All
+// removals run on a single transaction (via the sqlc Queries.WithTx) so a user
+// is never left half-deleted.
+func (r *SqlUserRepository) DeleteUser(userID string) error {
+	r.datastore.DbLock.Lock()
+	defer r.datastore.DbLock.Unlock()
+
+	tx, err := r.datastore.DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint
+
+	q := r.datastore.GetQueries().WithTx(tx)
+	ctx := context.Background()
+
+	// Remove rows that reference the user before the user row itself.
+	if err := q.DeleteUserAccessTokens(ctx, userID); err != nil {
+		return errors.Wrap(err, "unable to delete user access tokens")
+	}
+	if err := q.DeleteUserAuth(ctx, userID); err != nil {
+		return errors.Wrap(err, "unable to delete user auth")
+	}
+	if err := q.DeleteUserMessages(ctx, sql.NullString{String: userID, Valid: true}); err != nil {
+		return errors.Wrap(err, "unable to delete user messages")
+	}
+
+	rowsDeleted, err := q.DeleteUserByID(ctx, userID)
+	if err != nil {
+		return errors.Wrap(err, "unable to delete user")
+	}
+	if rowsDeleted == 0 {
+		return errors.New("user " + userID + " not found")
+	}
+
+	return tx.Commit()
+}
+
 // GetModeratorUsers will return a list of users with moderator access.
 func (r *SqlUserRepository) GetModeratorUsers() []*models.User {
-	query := `SELECT id, display_name, scopes, display_color, created_at, disabled_at, previous_names, namechanged_at FROM (
-		WITH RECURSIVE split(id, display_name, scopes, display_color, created_at, disabled_at, previous_names, namechanged_at, scope, rest) AS (
-		  SELECT id, display_name, scopes, display_color, created_at, disabled_at, previous_names, namechanged_at, '', scopes || ',' FROM users
+	query := `SELECT id, display_name, scopes, display_color, created_at, disabled_at, disabled_reason, previous_names, namechanged_at FROM (
+		WITH RECURSIVE split(id, display_name, scopes, display_color, created_at, disabled_at, disabled_reason, previous_names, namechanged_at, scope, rest) AS (
+		  SELECT id, display_name, scopes, display_color, created_at, disabled_at, disabled_reason, previous_names, namechanged_at, '', scopes || ',' FROM users
 		   UNION ALL
-		  SELECT id, display_name, scopes, display_color, created_at, disabled_at, previous_names, namechanged_at,
+		  SELECT id, display_name, scopes, display_color, created_at, disabled_at, disabled_reason, previous_names, namechanged_at,
 				 substr(rest, 0, instr(rest, ',')),
 				 substr(rest, instr(rest, ',')+1)
 			FROM split
 		   WHERE rest <> '')
-		SELECT id, display_name, scopes, display_color, created_at, disabled_at, previous_names, namechanged_at, scope
+		SELECT id, display_name, scopes, display_color, created_at, disabled_at, disabled_reason, previous_names, namechanged_at, scope
 		  FROM split
 		 WHERE scope <> ''
 		 ORDER BY created_at
@@ -448,11 +703,12 @@ func (r *SqlUserRepository) getUsersFromRows(rows *sql.Rows) []*models.User {
 		var displayColor int
 		var createdAt time.Time
 		var disabledAt *time.Time
+		var disabledReason *string
 		var previousUsernames string
 		var userNameChangedAt *time.Time
 		var scopesString *string
 
-		if err := rows.Scan(&id, &displayName, &scopesString, &displayColor, &createdAt, &disabledAt, &previousUsernames, &userNameChangedAt); err != nil {
+		if err := rows.Scan(&id, &displayName, &scopesString, &displayColor, &createdAt, &disabledAt, &disabledReason, &previousUsernames, &userNameChangedAt); err != nil {
 			log.Errorln("error creating collection of users from results", err)
 			return nil
 		}
@@ -461,16 +717,21 @@ func (r *SqlUserRepository) getUsersFromRows(rows *sql.Rows) []*models.User {
 		if scopesString != nil {
 			scopes = strings.Split(*scopesString, ",")
 		}
+		var reason string
+		if disabledReason != nil {
+			reason = *disabledReason
+		}
 
 		user := &models.User{
-			ID:            id,
-			DisplayName:   displayName,
-			DisplayColor:  displayColor,
-			CreatedAt:     createdAt,
-			DisabledAt:    disabledAt,
-			PreviousNames: strings.Split(previousUsernames, ","),
-			NameChangedAt: userNameChangedAt,
-			Scopes:        scopes,
+			ID:             id,
+			DisplayName:    displayName,
+			DisplayColor:   displayColor,
+			CreatedAt:      createdAt,
+			DisabledAt:     disabledAt,
+			DisabledReason: reason,
+			PreviousNames:  strings.Split(previousUsernames, ","),
+			NameChangedAt:  userNameChangedAt,
+			Scopes:         scopes,
 		}
 		users = append(users, user)
 	}
@@ -480,37 +741,6 @@ func (r *SqlUserRepository) getUsersFromRows(rows *sql.Rows) []*models.User {
 	})
 
 	return users
-}
-
-func (r *SqlUserRepository) getUserFromRow(row *sql.Row) *models.User {
-	var id string
-	var displayName string
-	var displayColor int
-	var createdAt time.Time
-	var disabledAt *time.Time
-	var previousUsernames string
-	var userNameChangedAt *time.Time
-	var scopesString *string
-
-	if err := row.Scan(&id, &displayName, &displayColor, &createdAt, &disabledAt, &previousUsernames, &userNameChangedAt, &scopesString); err != nil {
-		return nil
-	}
-
-	var scopes []string
-	if scopesString != nil {
-		scopes = strings.Split(*scopesString, ",")
-	}
-
-	return &models.User{
-		ID:            id,
-		DisplayName:   displayName,
-		DisplayColor:  displayColor,
-		CreatedAt:     createdAt,
-		DisabledAt:    disabledAt,
-		PreviousNames: strings.Split(previousUsernames, ","),
-		NameChangedAt: userNameChangedAt,
-		Scopes:        scopes,
-	}
 }
 
 // InsertExternalAPIUser will add a new API user to the database.
@@ -583,6 +813,12 @@ func (r *SqlUserRepository) DeleteExternalAPIUser(token string) error {
 }
 
 // GetExternalAPIUserForAccessTokenAndScope will determine if a specific token has access to perform a scoped action.
+//
+// Only true third-party API integrations (users.type = 'API', created via the
+// admin Access Tokens UI) may authenticate to the scoped external API. Without
+// the type filter, any user that happened to carry an admin scope on a regular
+// access token — e.g. a user created and granted a session by a viewer-auth
+// plugin — would also pass, which is not the intent of this Bearer-token API.
 func (r *SqlUserRepository) GetExternalAPIUserForAccessTokenAndScope(token string, scope string) (*models.ExternalAPIUser, error) {
 	// This will split the scopes from comma separated to individual rows
 	// so we can efficiently find if a token supports a single scope.
@@ -621,6 +857,8 @@ FROM
         scopes || ','
       FROM
         users AS u
+      WHERE
+        u.type = 'API'
       UNION ALL
       SELECT
         id,

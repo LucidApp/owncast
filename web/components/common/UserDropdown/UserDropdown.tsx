@@ -1,11 +1,11 @@
 import { MenuProps, Dropdown, Button } from 'antd';
 import classnames from 'classnames';
 
-import { useRecoilState, useRecoilValue } from 'recoil';
-import { FC, useState } from 'react';
+import { useAtom, useAtomValue } from 'jotai';
+import { FC, useEffect, useState } from 'react';
 import { useHotkeys } from 'react-hotkeys-hook';
 import dynamic from 'next/dynamic';
-import { ErrorBoundary } from 'react-error-boundary';
+import { ErrorBoundary, getErrorMessage } from 'react-error-boundary';
 import {
   ChatState,
   chatStateAtom,
@@ -13,8 +13,8 @@ import {
   appStateAtom,
 } from '../../stores/ClientConfigStore';
 import styles from './UserDropdown.module.scss';
-import { AppStateOptions } from '../../stores/application-state';
 import { ComponentError } from '../../ui/ComponentError/ComponentError';
+import { getPendingFediverseAuth } from '../../../utils/fediverseAuthSession';
 
 // Lazy loaded components
 
@@ -79,9 +79,29 @@ export const UserDropdown: FC<UserDropdownProps> = ({
 }) => {
   const [showNameChangeModal, setShowNameChangeModal] = useState<boolean>(false);
   const [showAuthModal, setShowAuthModal] = useState<boolean>(false);
-  const [chatState, setChatState] = useRecoilState(chatStateAtom);
+  // Latch: once the auth modal has been opened, keep it mounted so in-flight
+  // auth state survives close/reopen (the v4 shell used destroyOnClose=false;
+  // the v6 AuthModal keeps children mounted after first open by default, but
+  // must not be unmounted by conditional rendering).
+  const [authModalMounted, setAuthModalMounted] = useState<boolean>(false);
+  const [chatState, setChatState] = useAtom(chatStateAtom);
   const [popupWindow, setPopupWindow] = useState<Window>(null);
-  const appState = useRecoilValue<AppStateOptions>(appStateAtom);
+  const appState = useAtomValue(appStateAtom);
+
+  // Reopen the auth modal on load if a fediverse verification was still in
+  // progress, so a viewer who reloaded mid-flow (issue #4887) lands back on the
+  // code-entry step instead of losing it.
+  useEffect(() => {
+    if (getPendingFediverseAuth()) {
+      setShowAuthModal(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (showAuthModal) {
+      setAuthModalMounted(true);
+    }
+  }, [showAuthModal]);
 
   const toggleChatVisibility = () => {
     // If we don't support the hide chat option then don't do anything.
@@ -138,7 +158,7 @@ export const UserDropdown: FC<UserDropdownProps> = ({
     [chatState === ChatState.VISIBLE],
   );
 
-  const currentUser = useRecoilValue(currentUserAtom);
+  const currentUser = useAtomValue(currentUserAtom);
   if (!currentUser) {
     return null;
   }
@@ -183,7 +203,7 @@ export const UserDropdown: FC<UserDropdownProps> = ({
       fallbackRender={({ error, resetErrorBoundary }) => (
         <ComponentError
           componentName="UserDropdown"
-          message={error.message}
+          message={getErrorMessage(error)}
           retryFunction={resetErrorBoundary}
         />
       )}
@@ -209,13 +229,9 @@ export const UserDropdown: FC<UserDropdownProps> = ({
         >
           <NameChangeModal closeModal={closeChangeNameModal} />
         </Modal>
-        <Modal
-          title="Authenticate"
-          open={showAuthModal}
-          handleCancel={() => setShowAuthModal(false)}
-        >
-          <AuthModal />
-        </Modal>
+        {(showAuthModal || authModalMounted) && (
+          <AuthModal open={showAuthModal} handleClose={() => setShowAuthModal(false)} />
+        )}
       </div>
     </ErrorBoundary>
   );

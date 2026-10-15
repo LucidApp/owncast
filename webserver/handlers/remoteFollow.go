@@ -2,19 +2,16 @@ package handlers
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
-	"net/url"
 	"strings"
 
-	"github.com/owncast/owncast/activitypub/webfinger"
-	"github.com/owncast/owncast/persistence/configrepository"
+	"github.com/owncast/owncast/services/activitypub/webfinger"
 	"github.com/owncast/owncast/webserver/handlers/generated"
 	webutils "github.com/owncast/owncast/webserver/utils"
 )
 
 // RemoteFollow handles a request to begin the remote follow redirect flow.
-func RemoteFollow(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) RemoteFollow(w http.ResponseWriter, r *http.Request) {
 	type followResponse struct {
 		RedirectURL string `json:"redirectUrl"`
 	}
@@ -36,10 +33,7 @@ func RemoteFollow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	configRepository := configrepository.Get()
-	localActorPath, _ := url.Parse(configRepository.GetServerURL())
-	localActorPath.Path = fmt.Sprintf("/federation/user/%s", configRepository.GetDefaultFederationUsername())
-	var template string
+	localActorPath := h.apBuilder.MakeLocalIRIForAccount(h.configRepository.GetDefaultFederationUsername())
 	links, err := webfinger.GetWebfingerLinks(*request.Account)
 	if err != nil {
 		webutils.WriteSimpleResponse(w, false, err.Error())
@@ -47,15 +41,9 @@ func RemoteFollow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Acquire the remote follow redirect template.
-	for _, link := range links {
-		for k, v := range link {
-			if k == "rel" && v == "http://ostatus.org/schema/1.0/subscribe" && link["template"] != nil {
-				template = link["template"].(string)
-			}
-		}
-	}
+	template := remoteFollowTemplate(links)
 
-	if localActorPath.String() == "" || template == "" {
+	if localActorPath == nil || localActorPath.String() == "" || template == "" {
 		webutils.WriteSimpleResponse(w, false, "unable to determine remote follow information for "+*request.Account)
 		return
 	}
@@ -66,4 +54,15 @@ func RemoteFollow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	webutils.WriteResponse(w, response)
+}
+
+func remoteFollowTemplate(links []map[string]interface{}) string {
+	for _, link := range links {
+		rel, relOK := link["rel"].(string)
+		template, templateOK := link["template"].(string)
+		if rel == "http://ostatus.org/schema/1.0/subscribe" && templateOK && template != "" && relOK {
+			return template
+		}
+	}
+	return ""
 }

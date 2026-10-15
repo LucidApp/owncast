@@ -2,37 +2,81 @@
 # be optionally run to assist in Owncast development.
 # This file should be placed in the root of the Owncast repository.
 # It will perform code linting, formatting, run tests, and other checks.
-# To enable this, you need to enable to enable the hooks by running:
-# go tool lefthook install
+#
+# To enable, run:
+#   make install-hooks
 #
 # To learn more: https://lefthook.dev/usage/commands.html#lefthook-install
 #
-# To test the install run: go tool lefthook run test
+# To test the install run: ./bin/lefthook run test
 # And you should see the Go and JS tests run.
+
 
 pre-push:
   parallel: true
   commands:
+    ensure-npm:
+      run: |
+        command -v npm >/dev/null 2>&1 || {
+          echo 'npm not found in PATH; it is required to run these hooks. Install Node.js/npm, or bypass with: git push --no-verify' >&2
+          exit 1
+        }
+    go-test:
+      glob: '*.{go,mod,sum}'
+      run: go test ./... > /dev/null
     web-build:
       root: web/
       run: npm run build
+    # End-to-end plugin suite: builds the SDK example plugins, installs them
+    # into a real Owncast instance, and asserts on the live HTTP/API surface.
+    # `go test` and the web build don't cover this — a change to the plugin
+    # API contract (e.g. moving plugin CSS out of /api/config customStyles
+    # into a separate pluginStyles field) leaves both green while breaking
+    # these tests, which previously only ran in CI. Scoped to plugin code so
+    # it doesn't fire on unrelated Go changes: the plugin host/services, the
+    # integration tests themselves, and the two handlers that serialize
+    # plugin output into the endpoints these tests hit (/api/config and
+    # /customjavascript). Heavy (clones the SDK, downloads ffmpeg, builds the
+    # server); set PLUGIN_SDK_DIR to a local SDK checkout to skip the clone,
+    # or push with --no-verify to bypass.
+    plugin-integration:
+      glob:
+        - 'pluginhost/**'
+        - 'services/plugins/**'
+        - 'test/automated/plugins/**'
+        - 'webserver/handlers/config.go'
+        - 'webserver/handlers/customJavascript.go'
+      # The {push_files} reference is what makes the glob scoping above take
+      # effect: lefthook only skips a command on no matching files when the
+      # run string uses a files template. The file list itself is unused.
+      run: 'true "{push_files}" && cd test/automated/plugins && ./run.sh'
 
 pre-commit:
   parallel: true
   commands:
+    ensure-npm:
+      run: |
+        command -v npm >/dev/null 2>&1 || {
+          echo 'npm not found in PATH; it is required to run these hooks. Install Node.js/npm, or bypass with: git commit --no-verify' >&2
+          exit 1
+        }
     js-linter:
-      glob: '*.{js,ts,jsx,tsx}'
+      glob: '*.{js,mjs,ts,jsx,tsx}'
       root: web/
-      run: npx --yes eslint --fix --ext {staged_files}
+      run: npx --yes eslint --fix {staged_files}
       stage_fixed: true
     prettier:
-      glob: '*.{js,ts,jsx,tsx,css,scss}'
+      glob: '*.{js,mjs,ts,jsx,tsx,css,scss}'
       run: npx --yes prettier --write {staged_files}
-      staged_fixed: true
+      stage_fixed: true
     css-linter:
       glob: '*.{css,scss}'
       root: web/
-      run: npx --yes stylelint --fix {staged_files}
+      # --allow-empty-input: when the only staged CSS is generated output
+      # (e.g. styles/variables.css, public/styles/plugin.css), every file is
+      # skipped via .stylelintignore. Without this flag stylelint exits
+      # non-zero with AllFilesIgnoredError and aborts the commit.
+      run: npx --yes stylelint --fix --allow-empty-input {staged_files}
       stage_fixed: true
     js-unused:
       glob: '*.{js,ts,jsx,tsx}'
@@ -40,15 +84,21 @@ pre-commit:
       run: npx --yes knip --include dependencies,files,exports
     go-fmt:
       glob: '*.go'
-      run: go tool gofumpt -l -w {staged_files}
+      run: ./bin/gofumpt -l -w {staged_files}
       stage_fixed: true
     golangci-lint:
       glob: '*.go'
-      run: go get -tool github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.3.1 && go tool golangci-lint run ./...
-      stage_fixed: true
+      # The tools/ subdirectory is its own Go module. Skip linting when a
+      # tools-only change leaves no root-module packages to check.
+      run: |
+        packages=$(echo {staged_files} | tr ' ' '\n' | xargs -n1 dirname | sort -u | grep -vE '^tools$|^tools/' || true)
+        [ -z "$packages" ] || ./bin/golangci-lint run $packages
     go-test:
       glob: '*.go'
       run: go test ./... > /dev/null
+    shellcheck:
+      glob: '*.sh'
+      run: ./bin/shellcheck {staged_files}
     js-test:
       glob: '*.{js,ts,jsx}'
       root: web/
@@ -63,10 +113,32 @@ test:
     go:
       run: go test ./... > /dev/null
 
+lint:
+  parallel: true
+  commands:
+    golangci-lint:
+      glob: '*.go'
+      run: ./bin/golangci-lint run ./...
+
 # Validate commit messages per https://www.conventionalcommits.org/en/v1.0.0/
-# Install commitlint into your global npm path if you want to use it.
-# npm install -g @commitlint/{config-conventional,cli}
+# Uses commitlint when it's installed (npm install -g @commitlint/{config-conventional,cli}),
+# and otherwise falls back to a self-contained Conventional Commits check so the
+# format is enforced even without the global npm install.
 commit-msg:
   commands:
     'lint commit message':
-      run: command -v commitlint >/dev/null 2>&1 && commitlint --edit {1}
+      run: |
+        if command -v commitlint >/dev/null 2>&1; then
+          commitlint --edit {1}
+        else
+          subject=$(sed -n '1p' {1})
+          case "$subject" in
+            *WIP*|"Merge "*|"Revert "*|"fixup! "*|"squash! "*) exit 0 ;;
+          esac
+          if ! printf '%s' "$subject" | grep -qE '^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([^)]+\))?!?: .+'; then
+            echo "Commit message must follow Conventional Commits: type(scope): summary" >&2
+            echo "  allowed types: build chore ci docs feat fix perf refactor revert style test" >&2
+            echo "  got: $subject" >&2
+            exit 1
+          fi
+        fi

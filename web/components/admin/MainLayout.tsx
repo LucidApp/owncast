@@ -1,13 +1,17 @@
-import React, { FC, ReactNode, useContext, useEffect, useState } from 'react';
+import { FC, ReactNode, useContext, useEffect, useState } from 'react';
 import Link from 'next/link';
 import Head from 'next/head';
 import { differenceInSeconds } from 'date-fns';
 import { useRouter } from 'next/router';
-import { Layout, Menu, Alert, Button, Space, Tooltip } from 'antd';
+import { Layout, Menu, Alert, Button, Space, Tooltip, Badge } from 'antd';
 
+import { useTranslation } from 'next-export-i18n';
 import classNames from 'classnames';
 import dynamic from 'next/dynamic';
 import { upgradeVersionAvailable } from '../../utils/apis';
+import { PluginsContext } from '../../utils/plugins-context';
+import { PluginIcon } from './plugins/PluginIcon';
+import { Localization } from '../../types/localization';
 import { parseSecondsToDurationString } from '../../utils/format';
 
 import { OwncastLogo } from '../common/OwncastLogo/OwncastLogo';
@@ -17,6 +21,7 @@ import { AlertMessageContext } from '../../utils/alert-message-context';
 import { TextFieldWithSubmit } from './TextFieldWithSubmit';
 import { TEXTFIELD_PROPS_STREAM_TITLE } from '../../utils/config-constants';
 import { ComposeFederatedPost } from './ComposeFederatedPost';
+import { usePendingFeatureRequestCount } from '../../hooks/useFeatureRequests';
 import { UpdateArgs } from '../../types/config-section';
 import { FatalErrorStateModal } from '../modals/FatalErrorStateModal/FatalErrorStateModal';
 
@@ -27,6 +32,10 @@ const SettingOutlined = dynamic(() => import('@ant-design/icons/SettingOutlined'
 }); // Lazy loaded components
 
 const HomeOutlined = dynamic(() => import('@ant-design/icons/HomeOutlined'), {
+  ssr: false,
+});
+
+const TeamOutlined = dynamic(() => import('@ant-design/icons/TeamOutlined'), {
   ssr: false,
 });
 
@@ -58,11 +67,19 @@ const ExperimentOutlined = dynamic(() => import('@ant-design/icons/ExperimentOut
   ssr: false,
 });
 
+const AppstoreOutlined = dynamic(() => import('@ant-design/icons/AppstoreOutlined'), {
+  ssr: false,
+});
+
 const EditOutlined = dynamic(() => import('@ant-design/icons/EditOutlined'), {
   ssr: false,
 });
 
 const DownloadOutlined = dynamic(() => import('@ant-design/icons/DownloadOutlined'), {
+  ssr: false,
+});
+
+const StarOutlined = dynamic(() => import('@ant-design/icons/StarOutlined'), {
   ssr: false,
 });
 
@@ -75,10 +92,14 @@ export type MainLayoutProps = {
 };
 
 export const MainLayout: FC<MainLayoutProps> = ({ children }) => {
+  const { t } = useTranslation();
   const context = useContext(ServerStatusContext);
   const { serverConfig, online, broadcaster, versionNumber, error: serverError } = context || {};
   const { instanceDetails, chatDisabled, federation } = serverConfig;
   const { enabled: federationEnabled } = federation;
+
+  // Drives the badge on the Featured Streams sidebar item.
+  const pendingFeatureRequestCount = usePendingFeatureRequestCount(federationEnabled);
 
   const [currentStreamTitle, setCurrentStreamTitle] = useState('');
   const [postModalDisplayed, setPostModalDisplayed] = useState(false);
@@ -106,6 +127,12 @@ export const MainLayout: FC<MainLayoutProps> = ({ children }) => {
   useEffect(() => {
     checkForUpgrade();
   }, [versionNumber]);
+
+  // Plugins with declared admin pages drive the sidebar's Plugins
+  // submenu. Read from the shared PluginsContext so an install or
+  // uninstall on the Plugins page updates the submenu live, without the
+  // admin needing to refresh the whole page.
+  const { plugins } = useContext(PluginsContext);
 
   useEffect(() => {
     setCurrentStreamTitle(instanceDetails.streamTitle);
@@ -172,10 +199,6 @@ export const MainLayout: FC<MainLayoutProps> = ({ children }) => {
       key: '/admin/chat/messages',
     },
     {
-      label: <Link href="/admin/chat/users">Users</Link>,
-      key: '/admin/chat/users',
-    },
-    {
       label: <Link href="/admin/chat/emojis">Emojis</Link>,
       key: '/admin/chat/emojis',
     },
@@ -194,10 +217,14 @@ export const MainLayout: FC<MainLayoutProps> = ({ children }) => {
       label: <Link href="/admin/logs">Logs</Link>,
       key: '/admin/logs',
     },
-    federationEnabled && {
-      label: <Link href="/admin/federation/actions">Social Actions</Link>,
-      key: '/admin/federation/actions',
-    },
+    ...(federationEnabled
+      ? [
+          {
+            label: <Link href="/admin/federation/actions">Social Actions</Link>,
+            key: '/admin/federation/actions',
+          },
+        ]
+      : []),
   ];
 
   const configurationMenu = [
@@ -234,27 +261,60 @@ export const MainLayout: FC<MainLayoutProps> = ({ children }) => {
       icon: <LineChartOutlined />,
       key: '/admin/viewer-info',
     },
-    !chatDisabled && {
-      label: <span>Chat &amp; Users</span>,
-      icon: <MessageOutlined />,
-      children: chatMenu,
-      key: 'chat-and-users',
+    {
+      label: <Link href="/admin/users">Users</Link>,
+      icon: <TeamOutlined />,
+      key: '/admin/users',
     },
-    federationEnabled && {
-      key: '/admin/federation/followers',
-      label: <Link href="/admin/federation/followers">Followers</Link>,
-      icon: (
-        <span
-          role="img"
-          aria-label="message"
-          className="anticon anticon-message ant-menu-item-icon"
-        >
-          {/* Wrapping the icon in span for consistency with other icons used
-            directly from antd */}
-          <FediverseOutlined />
-        </span>
-      ),
-    },
+    ...(!chatDisabled
+      ? [
+          {
+            label: <span>Chat</span>,
+            icon: <MessageOutlined />,
+            children: chatMenu,
+            key: 'chat',
+          },
+        ]
+      : []),
+    ...(federationEnabled
+      ? [
+          {
+            key: '/admin/federation/followers',
+            label: <Link href="/admin/federation/followers">Followers</Link>,
+            icon: (
+              <span
+                role="img"
+                aria-label="message"
+                className="anticon anticon-message ant-menu-item-icon"
+              >
+                {/* Wrapping the icon in span for consistency with other icons used
+                directly from antd */}
+                <FediverseOutlined />
+              </span>
+            ),
+          },
+        ]
+      : []),
+    ...(federationEnabled
+      ? [
+          {
+            key: '/admin/config-featured',
+            label: (
+              <Link href="/admin/config-featured">
+                Featured Streams
+                {pendingFeatureRequestCount > 0 && (
+                  <Badge
+                    count={pendingFeatureRequestCount}
+                    size="small"
+                    style={{ marginInlineStart: 8 }}
+                  />
+                )}
+              </Link>
+            ),
+            icon: <StarOutlined />,
+          },
+        ]
+      : []),
     {
       key: 'configuration',
       label: 'Configuration',
@@ -273,19 +333,57 @@ export const MainLayout: FC<MainLayoutProps> = ({ children }) => {
       icon: <ExperimentOutlined />,
       children: integrationsMenu,
     },
-    upgradeVersion && {
-      type: 'divider',
-      key: 'upgrade-divider',
+    {
+      key: 'plugins-menu',
+      label: t(Localization.Admin.Plugins.sidebarTitle),
+      icon: <AppstoreOutlined />,
+      children: [
+        {
+          key: '/admin/plugins',
+          label: <Link href="/admin/plugins">{t(Localization.Admin.Plugins.overview)}</Link>,
+        },
+        // One entry per enabled plugin that declares at least one admin
+        // page, so the admin can jump straight to a plugin's config
+        // without going through the overview + Configure button. Disabled
+        // plugins are omitted — their admin pages don't serve. URL is
+        // a static route plus an id query param (the plugin's slug)
+        // because the admin UI is statically exported and can't
+        // enumerate plugin identifiers at build time. Sidebar labels use
+        // the human-readable display name.
+        ...plugins
+          .filter(p => p.enabled && Object.keys(p.adminPages ?? {}).length > 0)
+          .map(p => ({
+            key: `/admin/plugins/configure?id=${p.slug}`,
+            label: (
+              <Link href={{ pathname: '/admin/plugins/configure', query: { id: p.slug } }}>
+                {p.name}
+              </Link>
+            ),
+            icon: <PluginIcon plugin={p} size="sidebar" />,
+          })),
+      ],
     },
-    upgradeVersion && {
-      key: '/admin/upgrade',
-      label: (
-        <Link href="/admin/upgrade">
-          <strong>{upgradeMessage}</strong>
-        </Link>
-      ),
-      icon: <DownloadOutlined />,
-    },
+    ...(upgradeVersion
+      ? [
+          {
+            type: 'divider' as const,
+            key: 'upgrade-divider',
+          },
+        ]
+      : []),
+    ...(upgradeVersion
+      ? [
+          {
+            key: '/admin/upgrade',
+            label: (
+              <Link href="/admin/upgrade">
+                <strong>{upgradeMessage}</strong>
+              </Link>
+            ),
+            icon: <DownloadOutlined />,
+          },
+        ]
+      : []),
     {
       key: '/admin/help',
       label: <Link href="/admin/help">Help</Link>,
@@ -307,11 +405,21 @@ export const MainLayout: FC<MainLayoutProps> = ({ children }) => {
     );
   }, []);
 
+  // The per-plugin configure page is a query-string route
+  // (/admin/plugins/configure?id=...), so the literal-key match above
+  // doesn't fire when navigating to a specific plugin. Open the plugins
+  // submenu whenever the URL is anywhere in /admin/plugins.
+  useEffect(() => {
+    if (route && route.startsWith('/admin/plugins')) {
+      setOpenKeys(prev => (prev.includes('plugins-menu') ? prev : [...prev, 'plugins-menu']));
+    }
+  }, [route]);
+
   return (
     <Layout id="admin-page" className={appClass}>
       <Head>
         <title>Owncast Admin</title>
-        <link rel="icon" type="image/png" sizes="32x32" href="/img/favicon/favicon-32x32.png" />
+        <link rel="icon" href="/favicon.ico" />
       </Head>
 
       {serverError?.type === 'OWNCAST_SERVICE_UNREACHABLE' && (
@@ -327,6 +435,7 @@ export const MainLayout: FC<MainLayoutProps> = ({ children }) => {
         </h1>
         <Menu
           mode="inline"
+          theme="dark"
           className="menu-container"
           items={menuItems}
           selectedKeys={[route || '/admin']}
@@ -337,7 +446,7 @@ export const MainLayout: FC<MainLayoutProps> = ({ children }) => {
 
       <Layout className="layout-main">
         <Header className="layout-header">
-          <Space direction="horizontal">
+          <Space orientation="horizontal">
             <Tooltip title="Compose post to your social followers">
               <Button
                 type="link"
@@ -360,7 +469,7 @@ export const MainLayout: FC<MainLayoutProps> = ({ children }) => {
               onChange={handleStreamTitleChanged}
             />
           </div>
-          <Space direction="horizontal">{statusIndicator}</Space>
+          <Space orientation="horizontal">{statusIndicator}</Space>
         </Header>
 
         {headerAlertMessage}

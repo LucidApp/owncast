@@ -7,18 +7,18 @@ import (
 	"time"
 
 	"github.com/owncast/owncast/models"
-	"github.com/owncast/owncast/persistence/webhookrepository"
 	"github.com/owncast/owncast/webserver/handlers/generated"
 	webutils "github.com/owncast/owncast/webserver/utils"
 )
 
 type createWebhookRequest struct {
-	URL    string             `json:"url"`
-	Events []models.EventType `json:"events"`
+	URL           string             `json:"url"`
+	Events        []models.EventType `json:"events"`
+	WebhookSecret string             `json:"secret"`
 }
 
 // CreateWebhook will add a single webhook.
-func CreateWebhook(w http.ResponseWriter, r *http.Request) {
+func (a *Admin) CreateWebhook(w http.ResponseWriter, r *http.Request) {
 	decoder := json.NewDecoder(r.Body)
 	var request createWebhookRequest
 	if err := decoder.Decode(&request); err != nil {
@@ -32,26 +32,25 @@ func CreateWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	webhooksrepo := webhookrepository.Get()
-	newWebhookID, err := webhooksrepo.InsertWebhook(request.URL, request.Events)
+	newWebhookID, err := a.webhookRepository.InsertWebhook(request.URL, request.Events, request.WebhookSecret)
 	if err != nil {
 		webutils.InternalErrorHandler(w, err)
 		return
 	}
 
 	webutils.WriteResponse(w, models.Webhook{
-		ID:        newWebhookID,
-		URL:       request.URL,
-		Events:    request.Events,
-		Timestamp: time.Now(),
-		LastUsed:  nil,
+		ID:            newWebhookID,
+		URL:           request.URL,
+		Events:        request.Events,
+		Timestamp:     time.Now(),
+		LastUsed:      nil,
+		WebhookSecret: request.WebhookSecret,
 	})
 }
 
 // GetWebhooks will return all webhooks.
-func GetWebhooks(w http.ResponseWriter, r *http.Request) {
-	webhooksrepo := webhookrepository.Get()
-	webhooks, err := webhooksrepo.GetWebhooks()
+func (a *Admin) GetWebhooks(w http.ResponseWriter, r *http.Request) {
+	webhooks, err := a.webhookRepository.GetWebhooks()
 	if err != nil {
 		webutils.InternalErrorHandler(w, err)
 		return
@@ -61,7 +60,7 @@ func GetWebhooks(w http.ResponseWriter, r *http.Request) {
 }
 
 // DeleteWebhook will delete a single webhook.
-func DeleteWebhook(w http.ResponseWriter, r *http.Request) {
+func (a *Admin) DeleteWebhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		webutils.WriteSimpleResponse(w, false, r.Method+" not supported")
 		return
@@ -74,8 +73,7 @@ func DeleteWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	webhooksrepo := webhookrepository.Get()
-	if err := webhooksrepo.DeleteWebhook(*request.Id); err != nil {
+	if err := a.webhookRepository.DeleteWebhook(*request.Id); err != nil {
 		webutils.InternalErrorHandler(w, err)
 		return
 	}

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 
 info:
-  version: 0.2.3
+  version: 0.2.4
   title: Owncast APIs
   description: |-
     Internal
@@ -70,8 +70,13 @@ paths:
           $ref: '#/components/responses/501'
   /chat/register:
     post:
-      summary: Registers an anonymous chat user
+      summary: Resolves a gate session or registers an anonymous chat user
       operationId: RegisterAnonymousChatUser
+      description: |
+        Returns the existing user's identity and access token when a verified
+        auth.gate session is present. Otherwise creates an anonymous chat user.
+        A session whose user is missing or disabled is rejected without creating
+        an anonymous user. The proposed display name is ignored for gate sessions.
       tags: ['Internal', 'Chat']
       parameters:
         - in: header
@@ -91,13 +96,19 @@ paths:
                   type: string
       responses:
         '200':
-          description: Anonymous user information
+          description: Chat user information (existing gate user or newly registered anonymous user)
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/AnonymousUser'
         '400':
           $ref: '#/components/responses/400'
+        '403':
+          description: The verified gate session has no resolvable user or its user is disabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BaseAPIResponse'
     options:
       operationId: RegisterAnonymousChatUserOptions
       x-internal: true
@@ -268,9 +279,50 @@ paths:
                 $ref: '#/components/schemas/PaginatedFollowers'
         '400':
           $ref: '#/components/responses/400'
+  /metrics/cmcd:
+    post:
+      summary: CMCD collector accepting event and response mode playback reports
+      description: Reporting modes are defined by CMCD v2 (CTA-5004-A). CMCD v1 has no reporting modes, v1 request mode data is collected directly from the media requests it decorates. The collector maps any known CMCD keys it receives and does not reject reports based on their version.
+      operationId: ReportCmcd
+      tags: ['Internal']
+      requestBody:
+        description: A single CMCD report, or an array of batched reports, keyed by CMCD key names
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CmcdReportBody'
+      responses:
+        '200':
+          description: Report accepted
+        '400':
+          $ref: '#/components/responses/400'
+    get:
+      summary: CMCD collector accepting a report as a query parameter
+      operationId: ReportCmcdQuery
+      tags: ['Internal']
+      parameters:
+        - name: CMCD
+          in: query
+          description: CMCD report serialized as a CMCD dictionary payload
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Report accepted
+        '400':
+          $ref: '#/components/responses/400'
+    options:
+      operationId: ReportCmcdOptions
+      x-internal: true
+      tags: ['Objects', 'Internal']
+      responses:
+        '204':
+          $ref: '#/components/responses/204'
   /metrics/playback:
     post:
       summary: Save video playback metrics for future video health recording
+      description: Deprecated in favor of the CMCD collector at /metrics/cmcd, which accepts standard CMCD v2 (CTA-5004-A) reports. This endpoint remains functional for existing clients.
+      deprecated: true
       operationId: ReportPlaybackMetrics
       tags: ['Internal']
       requestBody:
@@ -339,7 +391,7 @@ paths:
         '204':
           $ref: '#/components/responses/204'
   /admin/disconnect:
-    get:
+    post:
       summary: Disconnect inbound stream
       operationId: DisconnectInboundConnection
       tags: ['Internal', 'Admin', 'Video']
@@ -451,6 +503,40 @@ paths:
           $ref: '#/components/responses/Default'
     options:
       operationId: GetActiveViewersOptions
+      x-internal: true
+      tags: ['Objects', 'Video']
+      responses:
+        '204':
+          $ref: '#/components/responses/204'
+  /admin/viewers/playback:
+    get:
+      summary: Get the playback clients of active viewers with their current playback health
+      description: |-
+        One entry per playback client currently watching, with the most recent playback measurements
+        for that client. Clients that report CMCD are identified by their player-supplied session ID,
+        which distinguishes players sharing an address; every other client is identified the same way
+        viewers are. A viewer with no playback measurements is still listed, with a null `playback`.
+      operationId: GetPlaybackClients
+      tags: ['Internal', 'Admin', 'Video']
+      security:
+        - BasicAuth: []
+      responses:
+        '200':
+          description: List of active playback clients
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PlaybackClient'
+        '400':
+          $ref: '#/components/responses/400'
+        '401':
+          $ref: '#/components/responses/401BasicAuth'
+        default:
+          $ref: '#/components/responses/Default'
+    options:
+      operationId: GetPlaybackClientsOptions
       x-internal: true
       tags: ['Objects', 'Video']
       responses:
@@ -789,6 +875,89 @@ paths:
       responses:
         '204':
           $ref: '#/components/responses/204'
+  /admin/users:
+    get:
+      summary: Get a paginated list of all users
+      operationId: GetUsers
+      tags: ['Internal', 'Admin']
+      security:
+        - BasicAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Limit'
+        - in: query
+          name: search
+          description: Filter to users whose display name contains this substring
+          schema:
+            type: string
+        - in: query
+          name: status
+          description: Filter users by status
+          schema:
+            type: string
+            enum: [all, active, bots]
+        - in: query
+          name: sort
+          description: Sort direction by creation date (defaults to newest first)
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: desc
+      responses:
+        '200':
+          description: A paginated list of users
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedUsers'
+        '400':
+          $ref: '#/components/responses/400'
+        '401':
+          $ref: '#/components/responses/401BasicAuth'
+        default:
+          $ref: '#/components/responses/Default'
+    options:
+      operationId: GetUsersOptions
+      x-internal: true
+      tags: ['Objects', 'Internal', 'Admin']
+      responses:
+        '204':
+          $ref: '#/components/responses/204'
+  /admin/users/delete:
+    post:
+      summary: Permanently delete a user and all of their data
+      operationId: DeleteUser
+      tags: ['Internal', 'Admin']
+      security:
+        - BasicAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userId:
+                  type: string
+      responses:
+        '200':
+          description: User was successfully deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BaseAPIResponse'
+        '400':
+          $ref: '#/components/responses/400'
+        '401':
+          $ref: '#/components/responses/401BasicAuth'
+        default:
+          $ref: '#/components/responses/Default'
+    options:
+      operationId: DeleteUserOptions
+      x-internal: true
+      tags: ['Objects', 'Internal', 'Admin']
+      responses:
+        '204':
+          $ref: '#/components/responses/204'
   /admin/logs:
     get:
       summary: Get all logs
@@ -945,6 +1114,33 @@ paths:
       responses:
         '204':
           $ref: '#/components/responses/204'
+  /admin/followers/directory:
+    get:
+      summary: Get directories that are featuring/listing this server
+      operationId: GetDirectoryFollowers
+      tags: ['Internal', 'Admin', 'Social']
+      security:
+        - BasicAuth: []
+      responses:
+        '200':
+          description: List of directories featuring this server
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Followers'
+        '400':
+          $ref: '#/components/responses/400'
+        '401':
+          $ref: '#/components/responses/401BasicAuth'
+        default:
+          $ref: '#/components/responses/Default'
+    options:
+      operationId: GetDirectoryFollowersOptions
+      x-internal: true
+      tags: ['Objects', 'Internal', 'Admin', 'Social']
+      responses:
+        '204':
+          $ref: '#/components/responses/204'
   /admin/followers/approve:
     post:
       summary: Set the following state of a follower or follow request
@@ -977,6 +1173,44 @@ paths:
           $ref: '#/components/responses/Default'
     options:
       operationId: ApproveFollowerOptions
+      x-internal: true
+      tags: ['Objects', 'Internal', 'Admin', 'Social']
+      responses:
+        '204':
+          $ref: '#/components/responses/204'
+  /admin/followers/remove:
+    post:
+      summary: Remove a follower without blocking them (they may follow again)
+      operationId: RemoveFollower
+      tags: ['Internal', 'Admin', 'Social']
+      security:
+        - BasicAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - actorIRI
+              properties:
+                actorIRI:
+                  type: string
+                  description: IRI of the follower to remove
+      responses:
+        '200':
+          description: Follower removed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BaseAPIResponse'
+        '400':
+          $ref: '#/components/responses/400'
+        '401':
+          $ref: '#/components/responses/401BasicAuth'
+        default:
+          $ref: '#/components/responses/Default'
+    options:
+      operationId: RemoveFollowerOptions
       x-internal: true
       tags: ['Objects', 'Internal', 'Admin', 'Social']
       responses:
@@ -1514,6 +1748,35 @@ paths:
       responses:
         '204':
           $ref: '#/components/responses/204'
+  /admin/config/chat/requireauthentication:
+    post:
+      summary: Set require authentication for chat
+      operationId: SetChatRequireAuthentication
+      tags: ['Internal', 'Admin', 'Chat']
+      security:
+        - BasicAuth: []
+      requestBody:
+        $ref: '#/components/requestBodies/AdminConfigValue'
+      responses:
+        '200':
+          description: Require authentication setting updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BaseAPIResponse'
+        '400':
+          $ref: '#/components/responses/400'
+        '401':
+          $ref: '#/components/responses/401BasicAuth'
+        default:
+          $ref: '#/components/responses/Default'
+    options:
+      operationId: SetChatRequireAuthenticationOptions
+      x-internal: true
+      tags: ['Objects', 'Internal', 'Admin', 'Chat']
+      responses:
+        '204':
+          $ref: '#/components/responses/204'
   /admin/config/video/codec:
     post:
       summary: Set video codec
@@ -1675,6 +1938,52 @@ paths:
       responses:
         '204':
           $ref: '#/components/responses/204'
+  /admin/config/favicon:
+    post:
+      summary: Upload custom favicon
+      operationId: SetFavicon
+      tags: ['Internal', 'Admin']
+      security:
+        - BasicAuth: []
+      requestBody:
+        $ref: '#/components/requestBodies/AdminConfigValue'
+      responses:
+        '200':
+          description: Favicon updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BaseAPIResponse'
+        '400':
+          $ref: '#/components/responses/400'
+        '401':
+          $ref: '#/components/responses/401BasicAuth'
+        default:
+          $ref: '#/components/responses/Default'
+    delete:
+      summary: Reset favicon to default
+      operationId: ResetFavicon
+      tags: ['Internal', 'Admin']
+      security:
+        - BasicAuth: []
+      responses:
+        '200':
+          description: Favicon reset to default
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BaseAPIResponse'
+        '401':
+          $ref: '#/components/responses/401BasicAuth'
+        default:
+          $ref: '#/components/responses/Default'
+    options:
+      operationId: SetFaviconOptions
+      x-internal: true
+      tags: ['Objects', 'Internal', 'Admin']
+      responses:
+        '204':
+          $ref: '#/components/responses/204'
   /admin/config/tags:
     post:
       summary: Update server tags
@@ -1820,6 +2129,35 @@ paths:
       responses:
         '204':
           $ref: '#/components/responses/204'
+  /admin/config/rtmpserverbindaddress:
+    post:
+      summary: Update RTMP server bind address
+      operationId: SetRTMPServerBindAddress
+      tags: ['Internal', 'Admin', 'Video']
+      security:
+        - BasicAuth: []
+      requestBody:
+        $ref: '#/components/requestBodies/AdminConfigValue'
+      responses:
+        '200':
+          description: RTMP server bind address updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BaseAPIResponse'
+        '400':
+          $ref: '#/components/responses/400'
+        '401':
+          $ref: '#/components/responses/401BasicAuth'
+        default:
+          $ref: '#/components/responses/Default'
+    options:
+      operationId: SetRTMPServerBindAddressOptions
+      x-internal: true
+      tags: ['Objects', 'Internal', 'Admin', 'Video']
+      responses:
+        '204':
+          $ref: '#/components/responses/204'
   /admin/config/sockethostoverride:
     post:
       summary: Update websocket host override
@@ -1902,6 +2240,35 @@ paths:
           $ref: '#/components/responses/Default'
     options:
       operationId: SetNSFWOptions
+      x-internal: true
+      tags: ['Objects', 'Internal', 'Admin']
+      responses:
+        '204':
+          $ref: '#/components/responses/204'
+  /admin/config/autoplay:
+    post:
+      summary: Update autoplay behavior
+      operationId: SetAutoplay
+      tags: ['Internal', 'Admin']
+      security:
+        - BasicAuth: []
+      requestBody:
+        $ref: '#/components/requestBodies/AdminConfigValue'
+      responses:
+        '200':
+          description: Autoplay setting updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BaseAPIResponse'
+        '400':
+          $ref: '#/components/responses/400'
+        '401':
+          $ref: '#/components/responses/401BasicAuth'
+        default:
+          $ref: '#/components/responses/Default'
+    options:
+      operationId: SetAutoplayOptions
       x-internal: true
       tags: ['Objects', 'Internal', 'Admin']
       responses:
@@ -2277,6 +2644,64 @@ paths:
       responses:
         '204':
           $ref: '#/components/responses/204'
+  /admin/config/federation/enablequotes:
+    post:
+      summary: Set if posts from this server can be quoted
+      operationId: SetFederationEnableQuotes
+      tags: ['Internal', 'Admin', 'Social']
+      security:
+        - BasicAuth: []
+      requestBody:
+        $ref: '#/components/requestBodies/AdminConfigValue'
+      responses:
+        '200':
+          description: Federation quotes set
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BaseAPIResponse'
+        '400':
+          $ref: '#/components/responses/400'
+        '401':
+          $ref: '#/components/responses/401BasicAuth'
+        default:
+          $ref: '#/components/responses/Default'
+    options:
+      operationId: SetFederationEnableQuotesOptions
+      x-internal: true
+      tags: ['Objects', 'Internal', 'Admin', 'Social']
+      responses:
+        '204':
+          $ref: '#/components/responses/204'
+  /admin/config/federation/hidefollowers:
+    post:
+      summary: Set if the public followers tab is hidden on the web UI
+      operationId: SetFederationHideFollowersTab
+      tags: ['Internal', 'Admin', 'Social']
+      security:
+        - BasicAuth: []
+      requestBody:
+        $ref: '#/components/requestBodies/AdminConfigValue'
+      responses:
+        '200':
+          description: Federation hide followers tab set
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BaseAPIResponse'
+        '400':
+          $ref: '#/components/responses/400'
+        '401':
+          $ref: '#/components/responses/401BasicAuth'
+        default:
+          $ref: '#/components/responses/Default'
+    options:
+      operationId: SetFederationHideFollowersTabOptions
+      x-internal: true
+      tags: ['Objects', 'Internal', 'Admin', 'Social']
+      responses:
+        '204':
+          $ref: '#/components/responses/204'
   /admin/config/federation/username:
     post:
       summary: Set local federated username
@@ -2364,6 +2789,208 @@ paths:
       responses:
         '204':
           $ref: '#/components/responses/204'
+  /federation/servers:
+    get:
+      summary: Get list of federated servers
+      operationId: GetFederatedServers
+      tags: ['Internal', 'Federation']
+      responses:
+        '200':
+          description: List of federated servers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  servers:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/PublicFederatedServer'
+        '400':
+          $ref: '#/components/responses/400'
+        default:
+          $ref: '#/components/responses/Default'
+  /admin/federation/servers:
+    get:
+      summary: Get all federated servers (admin), including pending requests
+      operationId: GetAdminFederatedServers
+      tags: ['Internal', 'Admin', 'Federation']
+      security:
+        - BasicAuth: []
+      responses:
+        '200':
+          description: List of all federated servers, including those whose follow is still pending approval
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  servers:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/FederatedServer'
+        '401':
+          $ref: '#/components/responses/401BasicAuth'
+        default:
+          $ref: '#/components/responses/Default'
+    post:
+      summary: Add a federated server to follow
+      operationId: AddFederatedServer
+      tags: ['Internal', 'Admin', 'Federation']
+      security:
+        - BasicAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - url
+              properties:
+                url:
+                  type: string
+                  format: uri
+                  description: URL of the federated Owncast server
+      responses:
+        '200':
+          description: Federated server added successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BaseAPIResponse'
+        '400':
+          $ref: '#/components/responses/400'
+        '401':
+          $ref: '#/components/responses/401BasicAuth'
+        default:
+          $ref: '#/components/responses/Default'
+    options:
+      operationId: AddFederatedServerOptions
+      x-internal: true
+      tags: ['Objects', 'Internal', 'Admin', 'Federation']
+      responses:
+        '204':
+          $ref: '#/components/responses/204'
+  /admin/federation/servers/{id}:
+    delete:
+      summary: Remove a federated server
+      operationId: RemoveFederatedServer
+      tags: ['Internal', 'Admin', 'Federation']
+      security:
+        - BasicAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: ID of the federated server to remove
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Federated server removed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BaseAPIResponse'
+        '400':
+          $ref: '#/components/responses/400'
+        '401':
+          $ref: '#/components/responses/401BasicAuth'
+        '404':
+          description: Federated server not found
+        default:
+          $ref: '#/components/responses/Default'
+    options:
+      operationId: RemoveFederatedServerOptions
+      x-internal: true
+      tags: ['Objects', 'Internal', 'Admin', 'Federation']
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: ID of the federated server to remove
+          schema:
+            type: integer
+      responses:
+        '204':
+          $ref: '#/components/responses/204'
+  /admin/federation/servers/{id}/reorder:
+    put:
+      summary: Move a federated server up or down in the priority order
+      operationId: ReorderFederatedServer
+      tags: ['Internal', 'Admin', 'Federation']
+      security:
+        - BasicAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: ID of the federated server to reorder
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - direction
+              properties:
+                direction:
+                  type: string
+                  enum: [up, down]
+                  description: Move the server up (higher priority) or down (lower priority)
+      responses:
+        '200':
+          description: Federated server reordered successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BaseAPIResponse'
+        '400':
+          $ref: '#/components/responses/400'
+        '401':
+          $ref: '#/components/responses/401BasicAuth'
+        default:
+          $ref: '#/components/responses/Default'
+    options:
+      operationId: ReorderFederatedServerOptions
+      x-internal: true
+      tags: ['Objects', 'Internal', 'Admin', 'Federation']
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: ID of the federated server to reorder
+          schema:
+            type: integer
+      responses:
+        '204':
+          $ref: '#/components/responses/204'
+  /admin/federation/feature-requests:
+    get:
+      summary: Get pending requests from other servers to feature this server's stream
+      operationId: GetFeatureRequests
+      tags: ['Internal', 'Admin', 'Federation']
+      security:
+        - BasicAuth: []
+      responses:
+        '200':
+          description: List of pending feature requests
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  requests:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Follower'
+        '401':
+          $ref: '#/components/responses/401BasicAuth'
+        default:
+          $ref: '#/components/responses/Default'
   /admin/config/notifications/discord:
     post:
       summary: Configure Discord notifications
@@ -2517,6 +3144,8 @@ paths:
                   type: array
                   items:
                     $ref: '#/components/schemas/WebhookEventType'
+                secret:
+                  type: string
       responses:
         '200':
           description: The new webhook
@@ -2640,97 +3269,8 @@ paths:
       responses:
         '204':
           $ref: '#/components/responses/204'
-  /admin/update/options:
-    get:
-      summary: Return the auto-update features that are supported for this instance
-      operationId: AutoUpdateOptions
-      tags: ['Internal', 'Admin']
-      x-internal: true
-      security:
-        - BasicAuth: []
-      responses:
-        '200':
-          description: Current auto-update options
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  supportsUpdate:
-                    type: boolean
-                  canRestart:
-                    type: boolean
-        '400':
-          $ref: '#/components/responses/400'
-        '401':
-          $ref: '#/components/responses/401BasicAuth'
-        default:
-          $ref: '#/components/responses/Default'
-    options:
-      operationId: AutoUpdateOptionsOptions
-      x-internal: true
-      tags: ['Objects', 'Internal', 'Admin']
-      responses:
-        '204':
-          $ref: '#/components/responses/204'
-  /admin/update/start:
-    get:
-      summary: Begin the auto-update
-      operationId: AutoUpdateStart
-      tags: ['Internal', 'Admin']
-      x-internal: true
-      security:
-        - BasicAuth: []
-      responses:
-        '200':
-          description: Console output from update
-          content:
-            text/plain:
-              schema:
-                type: string
-        '400':
-          $ref: '#/components/responses/400'
-        '401':
-          $ref: '#/components/responses/401BasicAuth'
-        default:
-          $ref: '#/components/responses/Default'
-    options:
-      operationId: AutoUpdateStartOptions
-      x-internal: true
-      tags: ['Objects', 'Internal', 'Admin']
-      responses:
-        '204':
-          $ref: '#/components/responses/204'
-  /admin/update/forcequit:
-    get:
-      summary: Force quit the server and restart it
-      operationId: AutoUpdateForceQuit
-      x-internal: true
-      tags: ['Internal', 'Admin']
-      security:
-        - BasicAuth: []
-      responses:
-        '200':
-          description: Server force restart has been ordered
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/BaseAPIResponse'
-        '400':
-          $ref: '#/components/responses/400'
-        '401':
-          $ref: '#/components/responses/401BasicAuth'
-        default:
-          $ref: '#/components/responses/Default'
-    options:
-      operationId: AutoUpdateForceQuitOptions
-      tags: ['Objects', 'Internal', 'Admin']
-      x-internal: true
-      responses:
-        '204':
-          $ref: '#/components/responses/204'
   /admin/yp/reset:
-    get:
+    post:
       summary: Reset YP configuration
       operationId: ResetYPRegistration
       tags: ['Internal', 'Admin']
@@ -3425,8 +3965,6 @@ paths:
                 $ref: '#/components/schemas/BaseAPIResponse'
         '400':
           $ref: '#/components/responses/400'
-        '403':
-          $ref: '#/components/responses/403'
 
 components:
   schemas:
@@ -3451,9 +3989,9 @@ components:
         serverTime:
           type: string
         lastConnectTime:
-          type: string
+          type: ['string', 'null']
         lastDisconnectTime:
-          type: string
+          type: ['string', 'null']
         versionNumber:
           type: string
         viewerCount:
@@ -3506,16 +4044,36 @@ components:
           type: array
           items:
             type: string
+        authProviders:
+          type: array
+          description: Friendly names of the external auth methods this user signed in with (e.g. IndieAuth, Fediverse, or a plugin slug). Absent for anonymous users.
+          items:
+            type: string
         displayColor:
           type: integer
         isBot:
           type: boolean
         authenticated:
           type: boolean
+    UserWithDisabledReason:
+      allOf:
+        - $ref: '#/components/schemas/User'
+        - type: object
+          properties:
+            disabledReason:
+              type: string
+              description: Reason provided when the user was disabled.
     Users:
       type: array
       items:
-        $ref: '#/components/schemas/User'
+        $ref: '#/components/schemas/UserWithDisabledReason'
+    PaginatedUsers:
+      type: object
+      properties:
+        total:
+          type: integer
+        results:
+          $ref: '#/components/schemas/Users'
     Follower:
       type: object
       properties:
@@ -3548,6 +4106,108 @@ components:
           type: integer
         results:
           $ref: '#/components/schemas/Followers'
+    FederatedServer:
+      type: object
+      description: A federated Owncast server that we follow
+      properties:
+        id:
+          type: integer
+          description: Unique identifier for the federated server
+        iri:
+          type: string
+          format: uri
+          description: IRI/URL of the federated server
+        name:
+          type: string
+          description: Display name of the federated server
+        logoUrl:
+          type: string
+          format: uri
+          description: URL of the server's logo image
+        isOnline:
+          type: boolean
+          description: Whether the server is currently online/streaming
+        streamTitle:
+          type: string
+          description: Title of the current stream (when online)
+        streamDescription:
+          type: string
+          description: Description of the current stream (when online)
+        tags:
+          type: array
+          items:
+            type: string
+          description: Tags associated with the current stream
+        thumbnailUrl:
+          type: string
+          format: uri
+          description: URL of the current stream thumbnail
+        displayName:
+          type: string
+          description: Human-friendly display name of the federated server
+        summary:
+          type: string
+        lastSeenOnline:
+          type: string
+          format: date-time
+          description: Last time the server was seen online
+        lastStatusUpdate:
+          type: string
+          format: date-time
+          description: Last time we received a status update
+        addedAt:
+          type: string
+          format: date-time
+          description: When we started tracking this server
+        followedAt:
+          type: string
+          format: date-time
+          description: When we started following this server
+        username:
+          type: string
+        acceptedAt:
+          type: string
+          format: date-time
+        rejectedAt:
+          type: string
+          format: date-time
+        pending:
+          type: boolean
+        followStatus:
+          type: string
+        priority:
+          type: integer
+    PublicFederatedServer:
+      type: object
+      description: A public featured Owncast server, ordered by canonical priority.
+      properties:
+        id:
+          type: integer
+        iri:
+          type: string
+          format: uri
+        name:
+          type: string
+        displayName:
+          type: string
+        summary:
+          type: string
+        logoUrl:
+          type: string
+          format: uri
+        isOnline:
+          type: boolean
+        streamTitle:
+          type: string
+        streamDescription:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        thumbnailUrl:
+          type: string
+          format: uri
     Event:
       type: object
       properties:
@@ -3660,10 +4320,19 @@ components:
           type: boolean
         chatDisabled:
           type: boolean
+        chatRequireAuthentication:
+          type: boolean
+          description: Whether users must authenticate before sending chat messages
         nsfw:
           type: boolean
+        autoplay:
+          $ref: '#/components/schemas/AutoplayMode'
         authentication:
           $ref: '#/components/schemas/AuthenticationConfig'
+    AutoplayMode:
+      type: string
+      enum: ['off', 'always', 'sound-only']
+      description: Viewer autoplay behavior.
     SocialHandle:
       type: object
       properties:
@@ -3711,6 +4380,8 @@ components:
           type: integer
         enabled:
           type: boolean
+        hideFollowersTab:
+          type: boolean
     AuthenticationConfig:
       type: object
       properties:
@@ -3754,24 +4425,76 @@ components:
           type: integer
         name:
           type: string
+    CmcdReport:
+      type: object
+      description: A CMCD v2 (CTA-5004-A) report keyed by CMCD key names. Any valid CMCD key is accepted; the keys below are the ones consumed.
+      additionalProperties: true
+      properties:
+        v:
+          type: integer
+          description: CMCD version of the report
+        sid:
+          type: string
+          description: Session ID identifying the player session
+        e:
+          type: string
+          description: Event type that triggered the report (event mode)
+        ts:
+          type: number
+          description: Timestamp of the report in epoch milliseconds
+        sta:
+          type: string
+          description: Player state token
+        mtp:
+          type: number
+          description: Measured throughput in kbps
+        ltc:
+          type: number
+          description: Live latency in milliseconds
+        bs:
+          type: boolean
+          description: Buffer starvation occurred
+        ec:
+          type: string
+          description: Error code accompanying an error event
+        ttlb:
+          type: number
+          description: Time to last byte in milliseconds (response mode)
+        sn:
+          type: number
+          description: Report sequence number
+    CmcdReportBody:
+      oneOf:
+        - $ref: '#/components/schemas/CmcdReport'
+        - type: array
+          items:
+            $ref: '#/components/schemas/CmcdReport'
     PlaybackMetrics:
       type: object
+      required:
+        - errors
+        - qualityVariantChanges
       properties:
         bandwidth:
           type: number
           format: double
+          description: The player's measured throughput in kbps.
         latency:
           type: number
           format: double
+          description: How far behind the live edge the player is, in seconds.
         errors:
           type: number
           format: double
+          description: Errors since the previous report, not a running total. Reports accumulate, so a client sending a cumulative count inflates the recorded figure.
         downloadDuration:
           type: number
           format: double
+          description: How long the player's most recent segment took to download, in seconds.
         qualityVariantChanges:
           type: number
           format: double
+          description: Quality variant switches since the previous report, not a running total.
     Broadcaster:
       type: object
       properties:
@@ -3908,13 +4631,97 @@ components:
           type: string
           format: date-time
         geo:
-          $ref: '#/components/schemas/GeoDetails'
+          anyOf:
+            - $ref: '#/components/schemas/GeoDetails'
+            - type: 'null'
         userAgent:
           type: string
         ipAddress:
           type: string
         clientID:
           type: string
+    PlaybackClient:
+      type: object
+      description: A single client currently playing back video, with its most recent playback health.
+      properties:
+        clientID:
+          type: string
+          description: Playback identity of the client. The player-supplied CMCD session ID when it provides one, otherwise the same request-derived identity used for viewers.
+        viewerID:
+          type: string
+          description: Request-derived identity of the viewer this client belongs to. Clients sharing an address and user agent share a viewer identity.
+        firstSeen:
+          type: string
+          format: date-time
+        geo:
+          anyOf:
+            - $ref: '#/components/schemas/GeoDetails'
+            - type: 'null'
+        userAgent:
+          type: string
+        ipAddress:
+          type: string
+        playback:
+          anyOf:
+            - $ref: '#/components/schemas/PlaybackClientHealth'
+            - type: 'null'
+          description: Null when no playback measurements exist for this client. A non-null playback object with measurementStatus explains why server-side measurements are unavailable.
+      required:
+        - clientID
+        - viewerID
+      additionalProperties: false
+    PlaybackClientHealth:
+      type: object
+      description: |-
+        The most recent playback measurements for one client. A measurement is null when it is
+        unknown for this client rather than measured as zero, because not every player reports every
+        value, server-side observation cannot measure latency at all, and a value the player has
+        stopped reporting expires rather than standing in for the current one.
+      properties:
+        source:
+          type: string
+          enum: [client, server]
+          description: Whether the player is currently reporting its own playback, or the server is measuring it while serving segments. Individual values can still come from the other side, most often the segment download duration of a player that reports everything except how long its downloads took.
+        lastUpdate:
+          type: string
+          format: date-time
+          description: When the most recent measurement of any value for this client arrived.
+        playerState:
+          type: string
+          enum: [p, a, w, k, e]
+          description: Latest player state from CMCD, where p is playing, a is paused, w is buffering, k is seeking, and e is ended.
+        measurementStatus:
+          type: string
+          enum: [unmeasurable]
+          description: Explains why the server could not produce a trustworthy segment measurement.
+        bandwidthKbps:
+          type: [number, 'null']
+          format: double
+          description: How fast video is reaching the client, either the player's own throughput estimate or the rate at which the server served its most recent segment. Server-side measurement may be unavailable when the server cannot see a trustworthy transfer, so clients report null unless the player measures itself.
+        latencySeconds:
+          type: [number, 'null']
+          format: double
+          description: How far behind the live edge the client is playing. Only players that report it provide this, currently those supporting CMCD and those using the deprecated playback metrics endpoint.
+        downloadSeconds:
+          type: [number, 'null']
+          format: double
+          description: How long the client's most recent video segment took to transfer.
+        bitrateKbps:
+          type: [number, 'null']
+          format: double
+          description: Encoded bitrate of the quality variant the client is playing, as advertised in the stream playlist. That figure includes audio, so it is near but not equal to the configured video bitrate of the matching output variant. Only players that report it provide this.
+        errorCount:
+          type: [number, 'null']
+          format: double
+          description: Errors, including buffering, since this client started playing. Null for a client the server can only observe, which reveals nothing about the player's errors.
+        qualityVariantChanges:
+          type: [number, 'null']
+          format: double
+          description: Quality variant switches since this client started playing. Null when the client reveals nothing about the quality it is playing.
+      required:
+        - source
+        - lastUpdate
+      additionalProperties: false
     GeoDetails:
       type: object
       properties:
@@ -3948,7 +4755,9 @@ components:
         user:
           $ref: '#/components/schemas/User'
         geo:
-          $ref: '#/components/schemas/GeoDetails'
+          anyOf:
+            - $ref: '#/components/schemas/GeoDetails'
+            - type: 'null'
         userAgent:
           type: string
         messageCount:
@@ -3974,7 +4783,7 @@ components:
           type: string
           format: date-time
         lastUsed:
-          type: string
+          type: ['string', 'null']
           format: date-time
         url:
           type: string
@@ -3991,6 +4800,7 @@ components:
         - USER_JOINED
         - USER_PARTED
         - NAME_CHANGE
+        - FEDIVERSE_ENGAGEMENT_FOLLOW
         - VISIBILITY-UPDATE
         - PING
         - PONG
@@ -4037,7 +4847,7 @@ components:
       type: object
       properties:
         user:
-          $ref: '#/components/schemas/User'
+          $ref: '#/components/schemas/UserWithDisabledReason'
         connectedClients:
           type: array
           items:
@@ -4088,7 +4898,9 @@ components:
         currentBroadcast:
           $ref: '#/components/schemas/CurrentBroadcast'
         health:
-          $ref: '#/components/schemas/StreamHealthOverview'
+          anyOf:
+            - $ref: '#/components/schemas/StreamHealthOverview'
+            - type: 'null'
         streamTitle:
           type: string
         versionNumber:
@@ -4150,6 +4962,8 @@ components:
           $ref: '#/components/schemas/AdminVideoSettings'
         rtmpServerPort:
           type: integer
+        rtmpServerAddress:
+          type: string
         webServerPort:
           type: integer
         chatDisabled:
@@ -4201,6 +5015,8 @@ components:
             $ref: '#/components/schemas/SocialHandle'
         nsfw:
           type: boolean
+        autoplay:
+          $ref: '#/components/schemas/AutoplayMode'
     AdminNotificationsConfig:
       type: object
       properties:
@@ -4231,6 +5047,10 @@ components:
         isPrivate:
           type: boolean
         showEngagement:
+          type: boolean
+        enableQuotes:
+          type: boolean
+        hideFollowersTab:
           type: boolean
     AdminVideoSettings:
       type: object

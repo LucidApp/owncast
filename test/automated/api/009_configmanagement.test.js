@@ -1,5 +1,6 @@
 var request = require('supertest');
 var bcrypt = require('bcrypt');
+var shajs = require('sha.js');
 
 const sendAdminRequest = require('./lib/admin').sendAdminRequest;
 const failAdminRequest = require('./lib/admin').failAdminRequest;
@@ -33,6 +34,7 @@ const defaultFederationConfig = {
 	enabled: false,
 	isPrivate: false,
 	showEngagement: true,
+	hideFollowersTab: false,
 	goLiveMessage: "I've gone live!",
 	username: 'streamer',
 	blockedDomains: [],
@@ -129,6 +131,7 @@ const newFederationConfig = {
 	username: randomString(),
 	goLiveMessage: randomString(),
 	showEngagement: !defaultFederationConfig.showEngagement,
+	hideFollowersTab: !defaultFederationConfig.hideFollowersTab,
 	blockedDomains: [randomString() + '.tld', randomString() + '.tld'],
 };
 
@@ -183,6 +186,9 @@ test('verify default admin configuration', async () => {
 	expect(res.body.federation.isPrivate).toBe(defaultFederationConfig.isPrivate);
 	expect(res.body.federation.showEngagement).toBe(
 		defaultFederationConfig.showEngagement,
+	);
+	expect(res.body.federation.hideFollowersTab).toBe(
+		defaultFederationConfig.hideFollowersTab,
 	);
 	expect(res.body.federation.goLiveMessage).toBe(
 		defaultFederationConfig.goLiveMessage,
@@ -284,6 +290,13 @@ test('toggle federation engagement', async () => {
 	);
 });
 
+test('toggle federation hide followers tab', async () => {
+	await sendAdminRequest(
+		'config/federation/hidefollowers',
+		newFederationConfig.hideFollowersTab,
+	);
+});
+
 test('set federation blocked domains', async () => {
 	await sendAdminRequest(
 		'config/federation/blockdomains',
@@ -329,6 +342,24 @@ test('disable search indexing', async () => {
 	);
 });
 
+test('set chat require authentication enabled', async () => {
+	await sendAdminRequest('config/chat/requireauthentication', true);
+});
+
+test('verify chat require authentication is enabled in config', async () => {
+	const res = await getAdminResponse('serverconfig');
+	expect(res.body.chatRequireAuthentication).toBe(true);
+});
+
+test('set chat require authentication disabled', async () => {
+	await sendAdminRequest('config/chat/requireauthentication', false);
+});
+
+test('verify chat require authentication is disabled in config', async () => {
+	const res = await getAdminResponse('serverconfig');
+	expect(res.body.chatRequireAuthentication).toBe(false);
+});
+
 test('change admin password', async () => {
 	await sendAdminRequest('config/adminpass', newAdminPassword);
 });
@@ -353,6 +384,35 @@ test('reset admin password', async () => {
 		'config/adminpass',
 		defaultAdminPassword,
 		(adminPassword = newAdminPassword),
+	);
+});
+
+let newAdminPasswordLong = randomString(80);
+
+test('change admin password >72 bytes', async () => {
+	await sendAdminRequest('config/adminpass', newAdminPasswordLong);
+});
+
+test('verify admin password change (>72 bytes)', async () => {
+	const res = await getAdminResponse(
+		'serverconfig',
+		(adminPassword = newAdminPasswordLong),
+	);
+
+	bcrypt.compare(
+		shajs('SHA512').update(newAdminPasswordLong).digest(),
+		res.body.adminPassword,
+		function (err, result) {
+			expect(result).toBe(true);
+		},
+	);
+});
+
+test('reset admin password (>72)', async () => {
+	await sendAdminRequest(
+		'config/adminpass',
+		defaultAdminPassword,
+		(adminPassword = newAdminPasswordLong),
 	);
 });
 
@@ -440,6 +500,9 @@ test('verify updated admin configuration', async () => {
 	expect(res.body.federation.showEngagement).toBe(
 		newFederationConfig.showEngagement,
 	);
+	expect(res.body.federation.hideFollowersTab).toBe(
+		newFederationConfig.hideFollowersTab,
+	);
 	expect(res.body.federation.blockedDomains).toStrictEqual(
 		newFederationConfig.blockedDomains,
 	);
@@ -453,6 +516,9 @@ test('verify updated frontend configuration', async () => {
 			expect(res.body.name).toBe(newServerName);
 			expect(res.body.logo).toBe('/logo');
 			expect(res.body.socialHandles).toStrictEqual(newSocialHandles);
+			expect(res.body.federation.hideFollowersTab).toBe(
+				newFederationConfig.hideFollowersTab,
+			);
 		});
 });
 

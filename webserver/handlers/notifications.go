@@ -4,18 +4,18 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/owncast/owncast/models"
-	"github.com/owncast/owncast/notifications"
-
-	"github.com/owncast/owncast/utils"
-
-	webutils "github.com/owncast/owncast/webserver/utils"
 	log "github.com/sirupsen/logrus"
+
+	"github.com/owncast/owncast/models"
+	browsernotifications "github.com/owncast/owncast/notifications/browser"
+	notificationsrepo "github.com/owncast/owncast/persistence/notificationsrepository"
+	"github.com/owncast/owncast/utils"
+	webutils "github.com/owncast/owncast/webserver/utils"
 )
 
 // RegisterForLiveNotifications will register a channel + destination to be
 // notified when a stream goes live.
-func RegisterForLiveNotifications(u models.User, w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) RegisterForLiveNotifications(u models.User, w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		webutils.WriteSimpleResponse(w, false, r.Method+" not supported")
 		return
@@ -37,14 +37,20 @@ func RegisterForLiveNotifications(u models.User, w http.ResponseWriter, r *http.
 	}
 
 	// Make sure the requested channel is one we want to handle.
-	validTypes := []string{notifications.BrowserPushNotification}
+	validTypes := []string{notificationsrepo.BrowserPushNotification}
 	_, validChannel := utils.FindInSlice(validTypes, req.Channel)
 	if !validChannel {
 		webutils.WriteSimpleResponse(w, false, "invalid notification channel: "+req.Channel)
 		return
 	}
 
-	if err := notifications.AddNotification(req.Channel, req.Destination); err != nil {
+	if _, err := browsernotifications.ParseAndValidateSubscription(req.Destination); err != nil {
+		log.Debugln(err)
+		webutils.WriteSimpleResponse(w, false, "invalid browser notification destination")
+		return
+	}
+
+	if err := h.notificationsRepository.AddNotification(req.Channel, req.Destination); err != nil {
 		log.Errorln(err)
 		webutils.WriteSimpleResponse(w, false, "unable to save notification")
 		return

@@ -1,4 +1,4 @@
-@import '../../../styles/mixins';
+@use '../../../styles/mixins' as *;
 
 .main {
   display: flex;
@@ -41,6 +41,42 @@
     margin-bottom: 0;
     padding-top: 0.5vh;
     padding-left: 1vw;
+
+    // The mobile action-button menu floats over the right end of this
+    // row (absolutely positioned, z-index 199), so anything under it
+    // can't be tapped. Reserve that strip so tabs and the all-tabs
+    // menu button always end before it.
+    margin-right: 52px;
+  }
+
+  // rc-tabs shows its own "more" dropdown for overflowing tabs in
+  // desktop mode but removes it entirely on mobile devices. The
+  // all-tabs menu button replaces it in both cases, so hide the
+  // built-in one here.
+  // stylelint-disable-next-line declaration-no-important -- antd's own
+  // `.ant-tabs > .ant-tabs-nav .ant-tabs-nav-operations` rule is more
+  // specific than anything this module can express cleanly.
+  :global(.ant-tabs-nav-operations) {
+    display: none !important;
+  }
+
+  // Show the all-tabs menu button only while the tab bar actually
+  // overflows. rc-tabs sets the ping classes on the nav wrap whenever
+  // tabs are scrolled out of view on either side. Toggle visibility
+  // rather than display, and fix the slot's width, so rc-tabs measures
+  // the same size at mount (before the lazy icon inside has loaded) as
+  // after: it only measures this slot once.
+  :global(.ant-tabs-extra-content) {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    visibility: hidden;
+  }
+
+  :global(.ant-tabs-nav-wrap-ping-left) ~ :global(.ant-tabs-extra-content),
+  :global(.ant-tabs-nav-wrap-ping-right) ~ :global(.ant-tabs-extra-content) {
+    visibility: visible;
   }
 }
 
@@ -56,6 +92,28 @@
 
 .offlineBanner {
   color: var(--theme-color-palette-4);
+}
+
+.offlineSection {
+  width: 100%;
+  background-color: var(--theme-color-components-video-background);
+}
+
+.offlineRecommendationLayout {
+  width: min(100%, 1160px);
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(320px, 0.9fr);
+  gap: clamp(1.25rem, 3vw, 2.75rem);
+  align-items: stretch;
+  margin: 0 auto;
+  padding: clamp(1rem, 4vw, 3.5rem);
+
+  @include screen(tablet) {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    padding: 0;
+  }
 }
 
 .actionButtonsContainer {
@@ -102,16 +160,18 @@
   display: grid;
 }
 
-.defaultTabBar {
-  width: 85%;
-}
-
 .bottomPageContentContainer {
   background-color: var(--theme-color-components-content-background);
   padding: calc(2 * var(--content-padding));
   border-radius: var(--theme-rounded-corners);
   width: 100%;
   margin-bottom: 20px;
+
+  // Keep a consistent minimum height across tabs so switching between
+  // panes with different amounts of content (e.g. a short "About" vs. a
+  // long "Followers" list) doesn't collapse/expand the layout and make
+  // the page jump around.
+  min-height: 50vh;
 
   h1,
   h2,

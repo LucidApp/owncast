@@ -1,4 +1,4 @@
-import React, { FC, useEffect, useState } from 'react';
+import { FC, useEffect, useState } from 'react';
 import classNames from 'classnames';
 import { Input, Form, InputNumber, Button } from 'antd';
 import { FieldUpdaterFunc } from '../../types/config-section';
@@ -37,24 +37,24 @@ export type TextFieldProps = {
 };
 
 export const TextField: FC<TextFieldProps> = ({
-  className,
-  disabled,
+  className = '',
+  disabled = false,
   fieldName,
-  label,
-  maxLength,
-  onBlur,
-  onChange,
-  onPressEnter,
-  onHandleSubmit,
-  pattern,
-  placeholder,
-  required,
-  status,
-  tip,
-  type,
-  useTrim,
-  value,
-  hasComplexityRequirements,
+  label = '',
+  maxLength = 255,
+  onBlur = () => {},
+  onChange = () => {},
+  onPressEnter = () => {},
+  onHandleSubmit = () => {},
+  pattern = '',
+  placeholder = '',
+  required = false,
+  status = null,
+  tip = '',
+  type = TEXTFIELD_TYPE_TEXT,
+  useTrim = false,
+  value = '',
+  hasComplexityRequirements = false,
 }) => {
   const [hasPwdChanged, setHasPwdChanged] = useState(false);
   const [showPwdButton, setShowPwdButton] = useState(false);
@@ -95,10 +95,7 @@ export const TextField: FC<TextFieldProps> = ({
   const passwordComplexityRules = [];
   // display the appropriate Ant text field
   let Field = Input as
-    | typeof Input
-    | typeof InputNumber
-    | typeof Input.TextArea
-    | typeof Input.Password;
+    typeof Input | typeof InputNumber | typeof Input.TextArea | typeof Input.Password;
   let fieldProps = {};
   if (type === TEXTFIELD_TYPE_TEXTAREA) {
     Field = Input.TextArea;
@@ -211,29 +208,4 @@ export const TextField: FC<TextFieldProps> = ({
       )}
     </div>
   );
-};
-
-TextField.defaultProps = {
-  className: '',
-  disabled: false,
-  label: '',
-  maxLength: 255,
-
-  placeholder: '',
-  required: false,
-  status: null,
-  tip: '',
-  type: TEXTFIELD_TYPE_TEXT,
-  value: '',
-
-  pattern: '',
-  useTrim: false,
-  useTrimLead: false,
-  hasComplexityRequirements: false,
-
-  onSubmit: () => {},
-  onBlur: () => {},
-  onChange: () => {},
-  onPressEnter: () => {},
-  onHandleSubmit: () => {},
 };

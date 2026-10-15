@@ -1,4 +1,4 @@
-@import '../../../../../web/styles/mixins';
+@use '../../../../../web/styles/mixins' as *;
 
 .follower {
   border-color: rgb(0 0 0 / 30%);
@@ -12,6 +12,7 @@
   line-height: 1.5rem;
   height: 100%;
   align-items: center;
+  overflow: hidden;
   transition: border-color 0.2s ease-in-out;
 
   &:hover {
@@ -37,15 +38,27 @@
     color: var(--theme-color-components-text-on-light);
     font-size: 0.7rem;
     line-height: 1.2;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .username {
-    display: block;
     font-family: var(--theme-text-display-font-family);
     font-weight: 600;
     color: var(--theme-color-components-text-on-light);
     font-size: 1rem;
     line-height: 1.1;
-    padding-bottom: 5px;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    margin-bottom: 5px;
+    overflow: hidden;
+  }
+
+  .textColumn {
+    flex: 1;
+    min-width: 0;
   }
 }

@@ -1,11 +1,16 @@
-import React, { ComponentType, FC } from 'react';
+import { ComponentType, FC, useState } from 'react';
 import dynamic from 'next/dynamic';
-import { TabsProps } from 'antd';
+import { Button, Dropdown } from 'antd';
+import type { TabsProps } from 'antd';
+import { useTranslation } from 'next-export-i18n';
 import { ErrorBoundary } from 'react-error-boundary';
 import classNames from 'classnames';
 import { SocialLink } from '../../../interfaces/social-link.model';
+import { PluginTab } from '../../../interfaces/client-config.model';
+import { Localization } from '../../../types/localization';
 import styles from './Content.module.scss';
 import { CustomPageContent } from '../CustomPageContent/CustomPageContent';
+import { PluginTabFrame } from '../PluginTabFrame/PluginTabFrame';
 import { ContentHeader } from '../../common/ContentHeader/ContentHeader';
 import { ComponentError } from '../ComponentError/ComponentError';
 
@@ -15,14 +20,20 @@ export type MobileContentProps = {
   tags: string[];
   socialHandles: SocialLink[];
   extraPageContent: string;
+  pluginTabs: PluginTab[];
   setShowFollowModal: (show: boolean) => void;
-  supportFediverseFeatures: boolean;
+  showFollowersTab: boolean;
   online: boolean;
+  federatedServers?: any[]; // Will be properly typed when API is implemented
 };
 
 // lazy loaded components
 
 const Tabs: ComponentType<TabsProps> = dynamic(() => import('antd').then(mod => mod.Tabs), {
+  ssr: false,
+});
+
+const UnorderedListOutlined = dynamic(() => import('@ant-design/icons/UnorderedListOutlined'), {
   ssr: false,
 });
 
@@ -35,6 +46,10 @@ const FollowerCollection = dynamic(
     ssr: false,
   },
 );
+
+const StreamsTab = dynamic(() => import('../StreamsTab/StreamsTab').then(mod => mod.StreamsTab), {
+  ssr: false,
+});
 
 const ComponentErrorFallback = ({ error, resetErrorBoundary }) => (
   <ComponentError
@@ -50,10 +65,15 @@ export const MobileContent: FC<MobileContentProps> = ({
   tags,
   socialHandles,
   extraPageContent,
+  pluginTabs,
   setShowFollowModal,
-  supportFediverseFeatures,
+  showFollowersTab,
   online,
+  federatedServers = [],
 }) => {
+  const { t } = useTranslation();
+  const [activeKey, setActiveKey] = useState('0');
+
   const aboutTabContent = (
     <>
       <ContentHeader name={name} summary={summary} tags={tags} links={socialHandles} logo="/logo" />
@@ -70,12 +90,69 @@ export const MobileContent: FC<MobileContentProps> = ({
     </div>
   );
 
-  const items = [];
+  const streamsTabContent = (
+    <div className={styles.bottomPageContentContainer}>
+      <StreamsTab servers={federatedServers} />
+    </div>
+  );
+
+  const items: NonNullable<TabsProps['items']> = [];
 
   items.push({ label: 'About', key: '0', children: aboutTabContent });
-  if (supportFediverseFeatures) {
+  if (showFollowersTab) {
     items.push({ label: 'Followers', key: '1', children: followersTabContent });
   }
+  // Add Featured tab if there are featured streams
+  if (federatedServers && federatedServers.length > 0) {
+    items.push({ label: 'Featured', key: '2', children: streamsTabContent });
+  }
+  // Plugin-contributed tabs render after the built-ins. Key is the
+  // slug+title combination; the host's validator rejects duplicate
+  // titles within a plugin, so this pair is unique across all
+  // plugin tabs and stable across renders (no index-as-key
+  // anti-pattern).
+  //
+  // forceRender mounts each tab's iframe up front instead of on first
+  // activation, so the srcdoc loads and the host injects styles while the
+  // pane is still hidden — the content is ready (no load flash) the moment
+  // the user taps the tab.
+  (pluginTabs || []).forEach(tab => {
+    items.push({
+      label: tab.title,
+      key: `plugin-${tab.slug}-${tab.title}`,
+      forceRender: true,
+      children: (
+        <div className={styles.bottomPageContentContainer}>
+          <PluginTabFrame content={tab.html} />
+        </div>
+      ),
+    });
+  });
+
+  // Menu listing every tab so any of them stays reachable when the tab
+  // bar overflows the screen. rc-tabs turns its own "more" dropdown off
+  // on mobile devices, leaving swipe-scrolling as the only way to reach
+  // far tabs. This button is shown via CSS only while the tab bar
+  // actually overflows (the nav-wrap ping classes).
+  const translatedShowAllTabs = t(Localization.Frontend.showAllTabs);
+  const showAllTabsLabel =
+    translatedShowAllTabs === Localization.Frontend.showAllTabs
+      ? 'Show all tabs'
+      : translatedShowAllTabs;
+
+  const allTabsMenu = (
+    <Dropdown
+      menu={{
+        items: items.map(({ key, label }) => ({ key, label })),
+        onClick: ({ key }) => setActiveKey(key),
+        selectedKeys: [activeKey],
+      }}
+      placement="bottomRight"
+      trigger={['click']}
+    >
+      <Button type="text" icon={<UnorderedListOutlined />} aria-label={showAllTabsLabel} />
+    </Dropdown>
+  );
 
   return (
     <ErrorBoundary
@@ -86,10 +163,15 @@ export const MobileContent: FC<MobileContentProps> = ({
     >
       {items.length > 1 ? (
         <div className={classNames([styles.lowerSectionMobileTabbed, online && styles.online])}>
-          <Tabs defaultActiveKey="0" items={items} />
+          <Tabs
+            activeKey={activeKey}
+            onChange={setActiveKey}
+            items={items}
+            tabBarExtraContent={{ right: allTabsMenu }}
+          />
         </div>
       ) : (
-        <div>{aboutTabContent}</div>
+        <div style={{ width: '100%' }}>{aboutTabContent}</div>
       )}
     </ErrorBoundary>
   );

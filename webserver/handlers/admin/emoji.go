@@ -6,8 +6,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/owncast/owncast/config"
+	"github.com/owncast/owncast/services/datastore"
 	"github.com/owncast/owncast/utils"
 	"github.com/owncast/owncast/webserver/handlers/generated"
 	webutils "github.com/owncast/owncast/webserver/utils"
@@ -82,14 +84,27 @@ func DeleteCustomEmoji(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	targetPath := filepath.Join(config.CustomEmojiPath, emoji.Name)
+	// The admin sends the emoji path relative to the emoji directory with a
+	// leading slash, and os.Root only accepts relative names.
+	name := strings.TrimPrefix(emoji.Name, "/")
 
-	if !filepath.IsLocal(targetPath) {
+	// Check the name that was sent rather than the result of joining it onto
+	// the emoji directory. Join cleans the ../ away first, which is what let
+	// traversal through the equivalent check here before.
+	if !filepath.IsLocal(name) {
 		webutils.WriteSimpleResponse(w, false, "Emoji path is not valid")
 		return
 	}
 
-	if err := os.Remove(targetPath); err != nil {
+	// Remove through a root handle so the emoji directory boundary holds even
+	// when a name that looks local resolves out of it through a symlink.
+	root, err := os.OpenRoot(config.CustomEmojiPath)
+	if err != nil {
+		webutils.WriteSimpleResponse(w, false, err.Error())
+		return
+	}
+	defer root.Close()
+	if err := root.Remove(name); err != nil {
 		if os.IsNotExist(err) {
 			webutils.WriteSimpleResponse(w, false, fmt.Sprintf("Emoji %q doesn't exist", emoji.Name))
 		} else {
@@ -97,6 +112,10 @@ func DeleteCustomEmoji(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+
+	// Force cache invalidation since deleting a file in a subdirectory doesn't
+	// update the parent directory's ModTime on all systems.
+	_, _ = datastore.UpdateEmojiList(true)
 
 	webutils.WriteSimpleResponse(w, true, fmt.Sprintf("Emoji %q has been deleted", emoji.Name))
 }

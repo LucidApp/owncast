@@ -4,6 +4,7 @@ set -e
 set -o errexit
 set -o pipefail
 
+# shellcheck disable=SC2329  # invoked via trap, not called directly
 finish() {
 	# shellcheck disable=SC2317
 	kill_with_kids "$BROWSERSTACK_PID"
@@ -22,6 +23,7 @@ BROWSERSTACK_PID=$!
 trap finish EXIT TERM INT
 
 npm install --silent >/dev/null
+# shellcheck disable=SC1091  # tools.sh is sourced at runtime; not available to the linter
 source ../tools.sh
 install_ffmpeg
 start_owncast

@@ -7,34 +7,22 @@ import (
 	"strings"
 	"time"
 
-	"github.com/owncast/owncast/config"
-	"github.com/owncast/owncast/core/data"
-	"github.com/owncast/owncast/models"
-	"github.com/owncast/owncast/static"
-	"github.com/owncast/owncast/utils"
-	"github.com/owncast/owncast/webserver/handlers/generated"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
+
+	"github.com/owncast/owncast/config"
+	"github.com/owncast/owncast/models"
+	"github.com/owncast/owncast/services/datastore"
+	"github.com/owncast/owncast/static"
+	"github.com/owncast/owncast/utils"
 )
 
 type SqlConfigRepository struct {
-	datastore *data.Datastore
-}
-
-// NOTE: This is temporary during the transition period.
-var temporaryGlobalInstance ConfigRepository
-
-// Get will return the user repository.
-func Get() ConfigRepository {
-	if temporaryGlobalInstance == nil {
-		i := New(data.GetDatastore())
-		temporaryGlobalInstance = i
-	}
-	return temporaryGlobalInstance
+	datastore *datastore.Datastore
 }
 
 // New will create a new instance of the UserRepository.
-func New(datastore *data.Datastore) ConfigRepository {
+func New(datastore *datastore.Datastore) ConfigRepository {
 	r := SqlConfigRepository{
 		datastore: datastore,
 	}
@@ -133,6 +121,22 @@ func (r *SqlConfigRepository) GetLogoUniquenessString() string {
 	}
 
 	return uniqueness
+}
+
+// GetFaviconPath will return the filename for the favicon in the data directory.
+func (r *SqlConfigRepository) GetFaviconPath() string {
+	favicon, err := r.datastore.GetString(faviconPathKey)
+	if err != nil {
+		log.Traceln(faviconPathKey, err)
+		return ""
+	}
+
+	return favicon
+}
+
+// SetFaviconPath will set the filename for the favicon in the data directory.
+func (r *SqlConfigRepository) SetFaviconPath(favicon string) error {
+	return r.datastore.SetString(faviconPathKey, favicon)
 }
 
 // GetServerSummary will return the server summary text.
@@ -262,6 +266,20 @@ func (r *SqlConfigRepository) GetRTMPPortNumber() int {
 // SetRTMPPortNumber will set the server RTMP port.
 func (r *SqlConfigRepository) SetRTMPPortNumber(port float64) error {
 	return r.datastore.SetNumber(rtmpPortNumberKey, port)
+}
+
+// GetRTMPBindAddress will return the server RTMP bind address.
+func (r *SqlConfigRepository) GetRTMPBindAddress() string {
+	address, err := r.datastore.GetString(rtmpBindAddressKey)
+	if err != nil || address == "" {
+		return "0.0.0.0"
+	}
+	return address
+}
+
+// SetRTMPBindAddress will set the server RTMP address.
+func (r *SqlConfigRepository) SetRTMPBindAddress(address string) error {
+	return r.datastore.SetString(rtmpBindAddressKey, address)
 }
 
 // GetServerMetadataTags will return the metadata tags.
@@ -404,6 +422,27 @@ func (r *SqlConfigRepository) GetNSFW() bool {
 	return nsfw
 }
 
+// SetAutoplay sets the viewer autoplay behavior.
+func (r *SqlConfigRepository) SetAutoplay(value models.AutoplayMode) error {
+	if err := value.Validate(); err != nil {
+		return err
+	}
+	return r.datastore.SetString(autoplayKey, string(value))
+}
+
+// GetAutoplay returns the viewer autoplay behavior, defaulting to off.
+func (r *SqlConfigRepository) GetAutoplay() models.AutoplayMode {
+	value, err := r.datastore.GetString(autoplayKey)
+	if err != nil {
+		return models.AutoplayOff
+	}
+	mode := models.AutoplayMode(value)
+	if !mode.Valid() {
+		return models.AutoplayOff
+	}
+	return mode
+}
+
 // SetFfmpegPath will set the custom ffmpeg path.
 func (r *SqlConfigRepository) SetFfmpegPath(path string) error {
 	return r.datastore.SetString(ffmpegPathKey, path)
@@ -541,6 +580,21 @@ func (r *SqlConfigRepository) GetChatSlurFilterEnabled() bool {
 	return false
 }
 
+// SetChatRequireAuthentication will set if authentication is required for chat.
+func (r *SqlConfigRepository) SetChatRequireAuthentication(enabled bool) error {
+	return r.datastore.SetBool(chatRequireAuthenticationKey, enabled)
+}
+
+// GetChatRequireAuthentication will return if authentication is required for chat.
+func (r *SqlConfigRepository) GetChatRequireAuthentication() bool {
+	enabled, err := r.datastore.GetBool(chatRequireAuthenticationKey)
+	if err == nil {
+		return enabled
+	}
+
+	return false
+}
+
 // GetExternalActions will return the registered external actions.
 func (r *SqlConfigRepository) GetExternalActions() []models.ExternalAction {
 	configEntry, err := r.datastore.Get(externalActionsKey)
@@ -608,8 +662,11 @@ func (r *SqlConfigRepository) GetVideoCodec() string {
 }
 
 // VerifySettings will perform a sanity check for specific settings values.
-func (r *SqlConfigRepository) VerifySettings() error {
-	if len(r.GetStreamKeys()) == 0 && config.TemporaryStreamKey == "" {
+// temporaryStreamKey is the value of the optional --streamkey CLI flag; the
+// repository checks it alongside the persisted stream-key list to decide
+// whether the server has any usable stream key at all.
+func (r *SqlConfigRepository) VerifySettings(temporaryStreamKey string) error {
+	if len(r.GetStreamKeys()) == 0 && temporaryStreamKey == "" {
 		log.Errorln("No stream key set. Streaming is disabled. Please set one via the admin or command line arguments")
 	}
 
@@ -806,6 +863,36 @@ func (r *SqlConfigRepository) GetFederationShowEngagement() bool {
 	return true
 }
 
+// SetFederationEnableQuotes will set if posts from this server can be quoted.
+func (r *SqlConfigRepository) SetFederationEnableQuotes(enabled bool) error {
+	return r.datastore.SetBool(federationEnableQuotesKey, enabled)
+}
+
+// GetFederationEnableQuotes will return if posts from this server can be quoted.
+func (r *SqlConfigRepository) GetFederationEnableQuotes() bool {
+	enabled, err := r.datastore.GetBool(federationEnableQuotesKey)
+	if err == nil {
+		return enabled
+	}
+
+	return true
+}
+
+// SetFederationHideFollowersTab will set if the followers tab is hidden on the web UI.
+func (r *SqlConfigRepository) SetFederationHideFollowersTab(hidden bool) error {
+	return r.datastore.SetBool(federationHideFollowersTabKey, hidden)
+}
+
+// GetFederationHideFollowersTab will return if the followers tab is hidden on the web UI.
+func (r *SqlConfigRepository) GetFederationHideFollowersTab() bool {
+	hidden, err := r.datastore.GetBool(federationHideFollowersTabKey)
+	if err == nil {
+		return hidden
+	}
+
+	return false
+}
+
 // SetBlockedFederatedDomains will set the blocked federated domains.
 func (r *SqlConfigRepository) SetBlockedFederatedDomains(domains []string) error {
 	return r.datastore.SetString(federationBlockedDomainsKey, strings.Join(domains, ","))
@@ -958,22 +1045,22 @@ func (r *SqlConfigRepository) GetCustomColorVariableValues() map[string]string {
 }
 
 // GetStreamKeys will return valid stream keys.
-func (r *SqlConfigRepository) GetStreamKeys() []generated.StreamKey {
+func (r *SqlConfigRepository) GetStreamKeys() []models.StreamKey {
 	configEntry, err := r.datastore.Get(streamKeysKey)
 	if err != nil {
-		return []generated.StreamKey{}
+		return []models.StreamKey{}
 	}
 
-	var streamKeys []generated.StreamKey
+	var streamKeys []models.StreamKey
 	if err := configEntry.GetObject(&streamKeys); err != nil {
-		return []generated.StreamKey{}
+		return []models.StreamKey{}
 	}
 
 	return streamKeys
 }
 
 // SetStreamKeys will set valid stream keys.
-func (r *SqlConfigRepository) SetStreamKeys(actions []generated.StreamKey) error {
+func (r *SqlConfigRepository) SetStreamKeys(actions []models.StreamKey) error {
 	configEntry := models.ConfigEntry{Key: streamKeysKey, Value: actions}
 	return r.datastore.Save(configEntry)
 }

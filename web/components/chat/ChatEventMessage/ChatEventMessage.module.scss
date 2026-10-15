@@ -1,0 +1,26 @@
+.root {
+  display: inline-flex;
+  padding: 10px 8px 10px 16px;
+
+  .moderatorBadge,
+  .user {
+    margin-right: 5px;
+    word-break: break-all;
+  }
+
+  .message {
+    font-weight: 400;
+    color: var(--theme-color-components-chat-text);
+    font-size: var(--chat-message-text-size);
+  }
+}
+
+.icon {
+  padding-right: var(--chat-notification-icon-padding);
+}
+
+@media screen and (width <= 350px) {
+  .root {
+    padding-left: 0;
+  }
+}

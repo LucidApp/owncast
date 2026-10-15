@@ -21,12 +21,15 @@ export const API_CHAT_FORBIDDEN_USERNAMES = '/chat/forbiddenusernames';
 export const API_CHAT_SUGGESTED_USERNAMES = '/chat/suggestedusernames';
 export const API_EXTERNAL_ACTIONS = '/externalactions';
 export const API_VIDEO_CODEC = '/video/codec';
+export const API_AUTOPLAY = '/autoplay';
 
 const API_FFMPEG = '/ffmpegpath';
 const API_INSTANCE_URL = '/serverurl';
 const API_LOGO = '/logo';
+const API_FAVICON = '/favicon';
 const API_NSFW_SWITCH = '/nsfw';
 const API_RTMP_PORT = '/rtmpserverport';
+const API_RTMP_ADDRESS = '/rtmpserverbindaddress';
 const API_SERVER_SUMMARY = '/serversummary';
 const API_SERVER_WELCOME_MESSAGE = '/welcomemessage';
 const API_SERVER_NAME = '/name';
@@ -40,6 +43,7 @@ const API_CHAT_JOIN_MESSAGES_ENABLED = '/chat/joinmessagesenabled';
 const API_CHAT_ESTABLISHED_MODE = '/chat/establishedusermode';
 const API_CHAT_SPAM_PROTECTION_ENABLED = '/chat/spamprotectionenabled';
 const API_CHAT_SLUR_FILTER_ENABLED = '/chat/slurfilterenabled';
+const API_CHAT_REQUIRE_AUTHENTICATION = '/chat/requireauthentication';
 const API_DISABLE_SEARCH_INDEXING = '/disablesearchindexing';
 const API_SOCKET_HOST_OVERRIDE = '/sockethostoverride';
 const API_VIDEO_SERVING_ENDPOINT = '/videoservingendpoint';
@@ -50,6 +54,8 @@ const API_FEDERATION_PRIVATE = '/federation/private';
 const API_FEDERATION_USERNAME = '/federation/username';
 const API_FEDERATION_GOLIVE_MESSAGE = '/federation/livemessage';
 const API_FEDERATION_SHOW_ENGAGEMENT = '/federation/showengagement';
+const API_FEDERATION_ENABLE_QUOTES = '/federation/enablequotes';
+const API_FEDERATION_HIDE_FOLLOWERS = '/federation/hidefollowers';
 export const API_FEDERATION_BLOCKED_DOMAINS = '/federation/blockdomains';
 
 const TEXTFIELD_TYPE_URL = 'url';
@@ -125,6 +131,14 @@ export const TEXTFIELD_PROPS_LOGO = {
   label: 'Logo',
   tip: 'Upload your logo if you have one (max size 2 MB). We recommend that you use a square image that is at least 256x256. SVGs are discouraged as they cannot be displayed on all social media platforms.',
 };
+export const TEXTFIELD_PROPS_FAVICON = {
+  apiPath: API_FAVICON,
+  configPath: 'instanceDetails',
+  maxLength: 255,
+  placeholder: '',
+  label: 'Favicon',
+  tip: 'Upload a custom favicon (PNG or ICO format, max 200KB). This icon appears in browser tabs and bookmarks.',
+};
 export const TEXTFIELD_PROPS_ADMIN_PASSWORD = {
   apiPath: API_STREAM_KEY,
   configPath: '',
@@ -162,6 +176,16 @@ export const TEXTFIELD_PROPS_RTMP_PORT = {
   placeholder: '1935',
   label: 'RTMP port',
   tip: 'What port should accept inbound broadcasts? Default is 1935',
+  required: true,
+  hasComplexityRequirements: false,
+};
+export const TEXTFIELD_PROPS_RTMP_ADDRESS = {
+  apiPath: API_RTMP_ADDRESS,
+  configPath: '',
+  maxLength: 30,
+  placeholder: '0.0.0.0',
+  label: 'RTMP address',
+  tip: 'What address/interface should accept inbound broadcasts? Default is 0.0.0.0',
   required: true,
   hasComplexityRequirements: false,
 };
@@ -292,6 +316,14 @@ export const CHAT_ESTABLISHED_USER_MODE = {
   useSubmit: true,
 };
 
+export const FIELD_PROPS_CHAT_REQUIRE_AUTHENTICATION = {
+  apiPath: API_CHAT_REQUIRE_AUTHENTICATION,
+  configPath: '',
+  label: 'Require Authentication',
+  tip: 'Only users who have authenticated may chat.',
+  useSubmit: true,
+};
+
 export const TEXTFIELD_PROPS_CHAT_FORBIDDEN_USERNAMES = {
   apiPath: API_CHAT_FORBIDDEN_USERNAMES,
   placeholder: 'username',
@@ -329,6 +361,22 @@ export const FIELD_PROPS_SHOW_FEDERATION_ENGAGEMENT = {
   configPath: 'federation',
   label: 'Show engagement',
   tip: 'Following, liking and sharing will appear in the chat feed.',
+  useSubmit: true,
+};
+
+export const FIELD_PROPS_FEDERATION_ENABLE_QUOTES = {
+  apiPath: API_FEDERATION_ENABLE_QUOTES,
+  configPath: 'federation',
+  label: 'Allow quotes',
+  tip: 'Let people on the Fediverse quote your posts in their own.',
+  useSubmit: true,
+};
+
+export const FIELD_PROPS_FEDERATION_HIDE_FOLLOWERS = {
+  apiPath: API_FEDERATION_HIDE_FOLLOWERS,
+  configPath: 'federation',
+  label: 'Hide followers',
+  tip: 'Hide the public "Followers" tab on your stream page. Social features stay enabled.',
   useSubmit: true,
 };
 
@@ -435,12 +483,12 @@ export const FRAMERATE_TOOLTIPS = {
   50: '50fps - Good for fast/action games, sports, HD video.',
   60: '60fps - Good for fast/action games, sports, HD video.',
   90: '90fps - Good for newer fast games and hardware.',
-  [FRAMERATE_DEFAULTS.max]: `${FRAMERATE_DEFAULTS.max}fps - Experimental, use at your own risk!`,
+  [FRAMERATE_DEFAULTS.max]: `${FRAMERATE_DEFAULTS.max}fps - Use at your own risk!`,
 };
 // VIDEO VARIANT FORM - bitrate
 export const VIDEO_BITRATE_DEFAULTS = {
   min: 400,
-  max: 6000,
+  max: 13000,
   defaultValue: 1200,
   unit: 'kbps',
   incrementBy: 100,
@@ -463,7 +511,8 @@ export const VIDEO_BITRATE_SLIDER_MARKS = {
     label: `${VIDEO_BITRATE_DEFAULTS.min} ${VIDEO_BITRATE_DEFAULTS.unit}`,
   },
   3000: 3000,
-  4500: 4500,
+  6000: 6000,
+  9000: 9000,
   [VIDEO_BITRATE_DEFAULTS.max]: {
     style: {
       marginLeft: '-10px',
@@ -629,3 +678,28 @@ export const PASSWORD_COMPLEXITY_RULES = [
 ];
 
 export const REGEX_PASSWORD = /^(?=.*?[A-Z])(?=.*?[a-z])(?=.*?[0-9])(?=.*?[!@#$%^&*])[^-]{8,192}$/;
+
+// Stream key validation rules - same as password but WITHOUT special character requirement
+// This is needed because some broadcasting software (e.g., Prism Live Studio) strips special characters
+export const STREAM_KEY_COMPLEXITY_RULES = [
+  { min: 8, message: '- minimum 8 characters' },
+  { max: 192, message: '- maximum 192 characters' },
+  {
+    pattern: /^(?=.*[a-z])/,
+    message: '- at least one lowercase letter',
+  },
+  {
+    pattern: /^(?=.*[A-Z])/,
+    message: '- at least one uppercase letter',
+  },
+  {
+    pattern: /\d/,
+    message: '- at least one digit',
+  },
+  {
+    pattern: /^[^-]+$/,
+    message: '- must NOT contain a dash: -',
+  },
+];
+
+export const REGEX_STREAM_KEY = /^(?=.*?[A-Z])(?=.*?[a-z])(?=.*?[0-9])[^-]{8,192}$/;

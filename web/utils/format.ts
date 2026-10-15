@@ -1,4 +1,22 @@
-import UAParser from 'ua-parser-js';
+import { format } from 'date-fns';
+import Bowser from 'bowser';
+
+// formatDisplayDate renders a user timestamp, including the year only when it
+// is not the current year. Shared by the admin user views.
+export function formatDisplayDate(date: string | Date) {
+  const d = new Date(date);
+  if (d.getFullYear() !== new Date().getFullYear()) {
+    return format(new Date(date), 'MMM d, yyyy H:mma');
+  }
+
+  return format(new Date(date), 'MMM d H:mma');
+}
+
+// formatDateOnly renders just the calendar date (no time of day), e.g.
+// "Jun 25, 2026". Used for the admin user table's "Created" column.
+export function formatDateOnly(date: string | Date) {
+  return format(new Date(date), 'MMM d, yyyy');
+}
 
 export function formatIPAddress(ipAddress: string): string {
   const ipAddressComponents = ipAddress.split(':');
@@ -43,11 +61,15 @@ export function parseSecondsToDurationString(seconds = 0) {
 }
 
 export function formatUAstring(uaString: string) {
-  const parser = UAParser(uaString);
-  const { device, os, browser } = parser;
-  const { major: browserVersion, name } = browser;
-  const { version: osVersion, name: osName } = os;
-  const { model, type } = device;
+  const { browser, os, platform } = Bowser.parse(uaString);
+  const name =
+    browser.name === 'Safari' && (platform.type === 'mobile' || platform.type === 'tablet')
+      ? 'Mobile Safari'
+      : browser.name;
+  const browserVersion = browser.version?.split('.')[0];
+  const osName = os.name === 'macOS' ? 'Mac OS' : os.name;
+  const osVersion = os.versionName || os.version;
+  const { model, type } = platform;
 
   if (uaString === 'libmpv') {
     return 'mpv media player';
@@ -57,7 +79,20 @@ export function formatUAstring(uaString: string) {
     return uaString;
   }
 
-  const deviceString = model || type ? ` (${model || type})` : '';
+  const device = model || (type === 'desktop' ? undefined : type);
+  const deviceString = device ? ` (${device})` : '';
   return `${name} ${browserVersion} on ${osName} ${osVersion}
   ${deviceString}`;
+}
+
+// formatLinkHostname reduces an absolute URL to its hostname for use as
+// compact link text (e.g. "https://github.com/x/y" -> "github.com").
+// Falls back to the raw string when it doesn't parse, so a malformed
+// value still renders something clickable rather than throwing.
+export function formatLinkHostname(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return url;
+  }
 }

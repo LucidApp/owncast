@@ -1,14 +1,13 @@
 import { FC } from 'react';
-import { useRecoilValue } from 'recoil';
+import { useAtomValue } from 'jotai';
 import { useTranslation } from 'next-export-i18n';
 import styles from './Footer.module.scss';
-import { ServerStatus } from '../../../interfaces/server-status.model';
 import { serverStatusState } from '../../stores/ClientConfigStore';
 import { Localization } from '../../../types';
 import Translation from '../Translation/Translation';
 
 export const Footer: FC = () => {
-  const clientStatus = useRecoilValue<ServerStatus>(serverStatusState);
+  const clientStatus = useAtomValue(serverStatusState);
   const { versionNumber } = clientStatus;
   const { t } = useTranslation();
   return (
@@ -22,13 +21,13 @@ export const Footer: FC = () => {
       </span>
       <span className={styles.links}>
         <a href="https://owncast.online/docs" target="_blank" rel="noreferrer">
-          {t('Documentation')}
+          {t(Localization.Frontend.Footer.documentation)}
         </a>
         <a href="https://owncast.online/help" target="_blank" rel="noreferrer">
-          {t('Contribute')}
+          {t(Localization.Frontend.Footer.contribute)}
         </a>
         <a href="https://github.com/owncast/owncast" target="_blank" rel="noreferrer">
-          {t('Source')}
+          {t(Localization.Frontend.Footer.source)}
         </a>
       </span>
     </footer>

@@ -1,11 +1,11 @@
-import { StoryFn, Meta } from '@storybook/react';
-import { RecoilRoot } from 'recoil';
+import { StoryFn, Meta } from '@storybook/nextjs';
+import { Provider } from 'jotai';
 import { BrowserNotifyModal } from './BrowserNotifyModal';
 import BrowserNotifyModalMock from '../../../stories/assets/mocks/notify-modal.png';
 
 const Example = () => (
   <div>
-    <BrowserNotifyModal />
+    <BrowserNotifyModal open handleClose={() => {}} />
   </div>
 );
 
@@ -35,9 +35,9 @@ const meta = {
 export default meta;
 
 const Template: StoryFn<typeof BrowserNotifyModal> = () => (
-  <RecoilRoot>
+  <Provider>
     <Example />
-  </RecoilRoot>
+  </Provider>
 );
 
 export const Basic = {

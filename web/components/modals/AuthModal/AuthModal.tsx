@@ -1,9 +1,10 @@
-import { Tabs } from 'antd';
-import { useRecoilValue } from 'recoil';
+import { Modal, Tabs } from 'antd';
+import { useAtomValue } from 'jotai';
 import { FC } from 'react';
-import { ErrorBoundary } from 'react-error-boundary';
+import { ErrorBoundary, getErrorMessage } from 'react-error-boundary';
 import { IndieAuthModal } from '../IndieAuthModal/IndieAuthModal';
 import { FediAuthModal } from '../FediAuthModal/FediAuthModal';
+import { getPendingFediverseAuth } from '../../../utils/fediverseAuthSession';
 
 import styles from './AuthModal.module.scss';
 import {
@@ -12,18 +13,19 @@ import {
   accessTokenAtom,
   clientConfigStateAtom,
 } from '../../stores/ClientConfigStore';
-import { ClientConfig } from '../../../interfaces/client-config.model';
 import { ComponentError } from '../../ui/ComponentError/ComponentError';
 
 export type AuthModalProps = {
+  open: boolean;
+  handleClose: () => void;
   forceTabs?: boolean;
 };
 
-export const AuthModal: FC<AuthModalProps> = ({ forceTabs }) => {
-  const authenticated = useRecoilValue<boolean>(chatAuthenticatedAtom);
-  const accessToken = useRecoilValue<string>(accessTokenAtom);
-  const currentUser = useRecoilValue(currentUserAtom);
-  const clientConfig = useRecoilValue<ClientConfig>(clientConfigStateAtom);
+export const AuthModal: FC<AuthModalProps> = ({ open, handleClose, forceTabs }) => {
+  const authenticated = useAtomValue(chatAuthenticatedAtom);
+  const accessToken = useAtomValue(accessTokenAtom);
+  const currentUser = useAtomValue(currentUserAtom);
+  const clientConfig = useAtomValue(clientConfigStateAtom);
 
   if (!currentUser) {
     return null;
@@ -67,26 +69,41 @@ export const AuthModal: FC<AuthModalProps> = ({ forceTabs }) => {
     { label: fediAuthTabTitle, key: '2', children: fediAuthTab },
   ];
 
+  // If a fediverse verification is still in progress (restored after a reload),
+  // open straight to that tab so the recovered code-entry step is visible. Only
+  // when federation is enabled, since the FediAuth tab is unreachable otherwise.
+  const defaultActiveKey = fediverseEnabled && getPendingFediverseAuth() ? '2' : '1';
+
   return (
-    <ErrorBoundary
-      // eslint-disable-next-line react/no-unstable-nested-components
-      fallbackRender={({ error, resetErrorBoundary }) => (
-        <ComponentError
-          componentName="AuthModal"
-          message={error.message}
-          retryFunction={resetErrorBoundary}
-        />
-      )}
+    <Modal
+      title="Authenticate"
+      open={open}
+      onCancel={handleClose}
+      maskClosable={false}
+      zIndex={999}
+      footer={null}
+      centered
     >
-      <div>
-        <Tabs
-          defaultActiveKey="1"
-          items={items}
-          type="card"
-          size="small"
-          renderTabBar={fediverseEnabled || forceTabs ? null : () => null}
-        />
-      </div>
-    </ErrorBoundary>
+      <ErrorBoundary
+        // eslint-disable-next-line react/no-unstable-nested-components
+        fallbackRender={({ error, resetErrorBoundary }) => (
+          <ComponentError
+            componentName="AuthModal"
+            message={getErrorMessage(error)}
+            retryFunction={resetErrorBoundary}
+          />
+        )}
+      >
+        <div>
+          <Tabs
+            defaultActiveKey={defaultActiveKey}
+            items={items}
+            type="card"
+            size="small"
+            renderTabBar={fediverseEnabled || forceTabs ? undefined : () => null}
+          />
+        </div>
+      </ErrorBoundary>
+    </Modal>
   );
 };

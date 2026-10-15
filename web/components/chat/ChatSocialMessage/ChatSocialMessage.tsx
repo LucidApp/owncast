@@ -1,6 +1,6 @@
 import { Avatar, Col, Row } from 'antd';
 import dynamic from 'next/dynamic';
-import React, { FC } from 'react';
+import { FC } from 'react';
 import cn from 'classnames';
 import { ChatSocialMessage as ChatMessage } from '../../../interfaces/chat-social-message.model';
 import styles from './ChatSocialMessage.module.scss';
@@ -50,7 +50,7 @@ export const ChatSocialMessage: FC<ChatSocialMessageProps> = ({ message }) => {
 
               <Icon className={styles.icon} />
             </Col>
-            <Col>
+            <Col className={styles.containerColumn}>
               <Row className={styles.account}>{title}</Row>
               <Row className={styles.body} dangerouslySetInnerHTML={{ __html: body }} />
             </Col>

@@ -1,8 +1,7 @@
-import React, { FC, useContext, useCallback, useEffect, useState } from 'react';
+import React, { FC, useContext, useCallback, useEffect, useMemo, useState } from 'react';
 
-import { Button, Col, Collapse, Row, Slider, Space } from 'antd';
-import Paragraph from 'antd/lib/typography/Paragraph';
-import Title from 'antd/lib/typography/Title';
+import { Alert, Button, Col, Collapse, Row, Slider, Space, Tooltip, Typography } from 'antd';
+import { useTranslation } from 'next-export-i18n';
 import { EditCustomStyles } from '../../EditCustomStyles';
 import s from './appearance.module.scss';
 import { postConfigUpdateToAPI, RESET_TIMEOUT } from '../../../../utils/config-constants';
@@ -12,10 +11,12 @@ import {
   STATUS_ERROR,
   STATUS_SUCCESS,
 } from '../../../../utils/input-statuses';
+import { Localization } from '../../../../types/localization';
 import { ServerStatusContext } from '../../../../utils/server-status-context';
 import { FormStatusIndicator } from '../../FormStatusIndicator';
 
 const { Panel } = Collapse;
+const { Title, Paragraph } = Typography;
 
 const ENDPOINT = '/appearance';
 
@@ -26,6 +27,10 @@ interface AppearanceVariable {
 
 type ColorCollectionProps = {
   variables: { name; description; value }[];
+  // overrides maps a variable name (without the leading `--`) to the
+  // display names of enabled plugins that also set it, so each swatch
+  // can flag that a plugin is styling that color too.
+  overrides: Record<string, string[]>;
   updateColor: (variable: string, color: string, description: string) => void;
 };
 
@@ -80,29 +85,45 @@ const ColorPicker = React.memo(
     value,
     name,
     description,
+    alsoSetBy,
     onChange,
   }: {
     value: string;
     name: string;
     description: string;
+    alsoSetBy?: string[];
     onChange: (name: string, value: string, description: string) => void;
-  }) => (
-    <Col span={3} key={name}>
-      <input
-        type="color"
-        id={name}
-        name={description}
-        title={description}
-        value={value}
-        className={s.colorPicker}
-        onChange={e => onChange(name, e.target.value, description)}
-      />
-      <div style={{ padding: '2px' }}>{description}</div>
-    </Col>
-  ),
+  }) => {
+    const { t } = useTranslation();
+    return (
+      <Col span={3} key={name}>
+        <input
+          type="color"
+          id={name}
+          name={description}
+          title={description}
+          value={value}
+          className={s.colorPicker}
+          onChange={e => onChange(name, e.target.value, description)}
+        />
+        <div style={{ padding: '2px' }}>{description}</div>
+        {alsoSetBy && alsoSetBy.length > 0 && (
+          <Tooltip
+            title={t(Localization.Admin.Appearance.alsoSetByPluginTooltip, {
+              plugins: alsoSetBy.join(', '),
+            })}
+          >
+            <div style={{ padding: '2px', fontSize: 11, opacity: 0.7 }}>
+              {t(Localization.Admin.Appearance.alsoSetByPlugin, { plugins: alsoSetBy.join(', ') })}
+            </div>
+          </Tooltip>
+        )}
+      </Col>
+    );
+  },
 );
 
-const ColorCollection: FC<ColorCollectionProps> = ({ variables, updateColor }) => {
+const ColorCollection: FC<ColorCollectionProps> = ({ variables, overrides, updateColor }) => {
   const cc = variables.map(colorVar => {
     const { name, description, value } = colorVar;
 
@@ -112,6 +133,7 @@ const ColorCollection: FC<ColorCollectionProps> = ({ variables, updateColor }) =
         value={value}
         name={name}
         description={description}
+        alsoSetBy={overrides[name]}
         onChange={updateColor}
       />
     );
@@ -122,10 +144,27 @@ const ColorCollection: FC<ColorCollectionProps> = ({ variables, updateColor }) =
 
 // eslint-disable-next-line react/function-component-definition
 export default function Appearance() {
+  const { t } = useTranslation();
   const serverStatusData = useContext(ServerStatusContext);
   const { serverConfig, setFieldInConfigState } = serverStatusData;
-  const { instanceDetails } = serverConfig;
+  const { instanceDetails, styleContributors = [] } = serverConfig;
   const { appearanceVariables } = instanceDetails;
+
+  // Map each appearance variable a plugin declares to the plugins that
+  // set it, so each swatch can flag "also set by <plugin>". Plugin
+  // styles render below the admin's appearance variables, so the admin's
+  // value wins; the badge tells the admin a plugin is also driving that
+  // color and that resetting falls back to the plugin's value.
+  const pluginVarOverrides = useMemo(() => {
+    const m: Record<string, string[]> = {};
+    styleContributors.forEach(plugin => {
+      (plugin.declaredVars || []).forEach(variable => {
+        if (!m[variable]) m[variable] = [];
+        m[variable].push(plugin.name);
+      });
+    });
+    return m;
+  }, [styleContributors]);
 
   const [defaultValues, setDefaultValues] = useState<Record<string, AppearanceVariable>>();
   const [customValues, setCustomValues] = useState<Record<string, AppearanceVariable>>();
@@ -179,7 +218,9 @@ export default function Appearance() {
       apiPath: ENDPOINT,
       data: { value: {} },
       onSuccess: () => {
-        setSubmitStatus(createInputStatus(STATUS_SUCCESS, 'Updated.'));
+        setSubmitStatus(
+          createInputStatus(STATUS_SUCCESS, t(Localization.Admin.StatusMessages.updated)),
+        );
         resetTimer = setTimeout(resetStates, RESET_TIMEOUT);
         setCustomValues({});
       },
@@ -200,7 +241,9 @@ export default function Appearance() {
       apiPath: ENDPOINT,
       data: { value: c },
       onSuccess: () => {
-        setSubmitStatus(createInputStatus(STATUS_SUCCESS, 'Updated.'));
+        setSubmitStatus(
+          createInputStatus(STATUS_SUCCESS, t(Localization.Admin.StatusMessages.updated)),
+        );
         resetTimer = setTimeout(resetStates, RESET_TIMEOUT);
 
         setFieldInConfigState({
@@ -239,6 +282,16 @@ export default function Appearance() {
       <Space direction="vertical">
         <Title>Customize Appearance</Title>
         <Paragraph>The following colors are used across the user interface.</Paragraph>
+        {styleContributors.length > 0 && (
+          <Alert
+            type="info"
+            showIcon
+            message={t(Localization.Admin.Appearance.pluginStylingActive)}
+            description={t(Localization.Admin.Appearance.pluginStylingDescription, {
+              plugins: styleContributors.map(p => p.name).join(', '),
+            })}
+          />
+        )}
         <div>
           <Collapse defaultActiveKey={['1']}>
             <Panel header={<strong>Section Colors</strong>} key="1">
@@ -249,6 +302,7 @@ export default function Appearance() {
               <Row gutter={[16, 16]}>
                 <ColorCollection
                   variables={transformToColorMap(componentColorVariables)}
+                  overrides={pluginVarOverrides}
                   updateColor={updateColor}
                 />
               </Row>
@@ -257,6 +311,7 @@ export default function Appearance() {
               <Row gutter={[16, 16]}>
                 <ColorCollection
                   variables={transformToColorMap(chatColorVariables)}
+                  overrides={pluginVarOverrides}
                   updateColor={updateColor}
                 />
               </Row>
@@ -301,7 +356,7 @@ export default function Appearance() {
           <Button type="primary" onClick={save}>
             Save Colors
           </Button>
-          <Button type="ghost" onClick={reset}>
+          <Button ghost onClick={reset}>
             Reset to Defaults
           </Button>
         </Space>

@@ -1,10 +1,13 @@
 import { Alert, Button, Input, Space, Spin, Collapse } from 'antd';
-import React, { FC, useState } from 'react';
+import React, { FC, useEffect, useState } from 'react';
 import dynamic from 'next/dynamic';
 import styles from './FediAuthModal.module.scss';
 import { isValidFediverseAccount } from '../../../utils/validators';
-
-const { Panel } = Collapse;
+import {
+  getPendingFediverseAuth,
+  setPendingFediverseAuth,
+  clearPendingFediverseAuth,
+} from '../../../utils/fediverseAuthSession';
 
 // Lazy loaded components
 
@@ -29,6 +32,17 @@ export const FediAuthModal: FC<FediAuthModalProps> = ({
   const [account, setAccount] = useState('');
   const [code, setCode] = useState('');
   const [verifyingCode, setVerifyingCode] = useState(false);
+
+  // Restore an in-progress verification if the viewer left and came back (e.g.
+  // backgrounded the tab to copy their code) within the OTP lifetime.
+  useEffect(() => {
+    const pending = getPendingFediverseAuth();
+    if (pending) {
+      setAccount(pending.account);
+      setValid(isValidFediverseAccount(pending.account));
+      setVerifyingCode(true);
+    }
+  }, []);
 
   const message = !authenticated ? (
     <span>
@@ -68,10 +82,21 @@ export const FediAuthModal: FC<FediAuthModalProps> = ({
       body: JSON.stringify(data),
     });
 
-    const content = await rawResponse.json();
+    let content: { message?: string } = {};
+    try {
+      content = await rawResponse.json();
+    } catch {
+      // Non-JSON response; the status check below handles it.
+    }
+
     if (content.message) {
+      // Callers set the error message, so just surface it.
       setLoading(false);
-      throw new Error(content.message); // let the callers handle setting error message since they already are
+      throw new Error(content.message);
+    }
+    if (!rawResponse.ok) {
+      setLoading(false);
+      throw new Error('Something went wrong. Please try again.');
     }
   };
 
@@ -83,11 +108,12 @@ export const FediAuthModal: FC<FediAuthModalProps> = ({
     try {
       await makeRequest(url, data);
 
-      // Success. Reload the page.
+      // Verified. Drop the persisted state and reload the page.
+      clearPendingFediverseAuth();
       window.location.href = '/';
     } catch (e) {
       console.error(e);
-      setErrorMessage(e.toString());
+      setErrorMessage(e.message);
     }
     setLoading(false);
   };
@@ -105,10 +131,11 @@ export const FediAuthModal: FC<FediAuthModalProps> = ({
 
     try {
       await makeRequest(url, data);
+      setPendingFediverseAuth(normalizedAccount);
       setVerifyingCode(true);
     } catch (e) {
       console.error(e);
-      setErrorMessage(e.toString());
+      setErrorMessage(e.message);
     }
     setLoading(false);
   };
@@ -158,23 +185,27 @@ export const FediAuthModal: FC<FediAuthModalProps> = ({
 
   return (
     <Spin spinning={loading}>
-      <Space direction="vertical">
+      <Space orientation="vertical">
         {message}
         {errorMessageText && (
           <Alert message="Error" description={errorMessageText} type="error" showIcon />
         )}
         {verifyingCode ? inputCodeStep : inputAccountStep}
-        <Collapse ghost>
-          <Panel
-            key="header"
-            header="Learn more about using the Fediverse to authenticate with chat."
-          >
-            <p>
-              You can link your chat identity with your Fediverse identity. Next time you want to
-              use this chat identity you can again go through the Fediverse authentication.
-            </p>
-          </Panel>
-        </Collapse>
+        <Collapse
+          ghost
+          items={[
+            {
+              key: 'header',
+              label: 'Learn more about using the Fediverse to authenticate with chat.',
+              children: (
+                <p>
+                  You can link your chat identity with your Fediverse identity. Next time you want
+                  to use this chat identity you can again go through the Fediverse authentication.
+                </p>
+              ),
+            },
+          ]}
+        />
         <div>
           <strong>Note</strong>: This is for authentication purposes only, and no personal
           information will be accessed or stored.

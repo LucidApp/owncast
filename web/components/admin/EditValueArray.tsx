@@ -1,5 +1,5 @@
 /* eslint-disable react/no-array-index-key */
-import React, { FC, useState } from 'react';
+import { FC, useState } from 'react';
 import { Typography, Tag } from 'antd';
 
 import { TextField } from './TextField';
@@ -25,14 +25,14 @@ export type EditStringArrayProps = {
 
 export const EditValueArray: FC<EditStringArrayProps> = ({
   title,
-  description,
+  description = null,
   placeholder,
-  maxLength,
+  maxLength = 50,
   values,
   handleDeleteIndex,
   handleCreateString,
-  submitStatus,
-  continuousStatusMessage,
+  submitStatus = null,
+  continuousStatusMessage = null,
 }) => {
   const [newStringInput, setNewStringInput] = useState<string>('');
 
@@ -83,11 +83,4 @@ export const EditValueArray: FC<EditStringArrayProps> = ({
       </div>
     </div>
   );
-};
-
-EditValueArray.defaultProps = {
-  maxLength: 50,
-  description: null,
-  submitStatus: null,
-  continuousStatusMessage: null,
 };

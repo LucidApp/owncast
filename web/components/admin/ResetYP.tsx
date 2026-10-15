@@ -1,5 +1,6 @@
 import { Popconfirm, Button, Typography } from 'antd';
 import { FC, useContext, useState } from 'react';
+import { useTranslation } from 'next-export-i18n';
 import { AlertMessageContext } from '../../utils/alert-message-context';
 
 import { API_YP_RESET, fetchData } from '../../utils/apis';
@@ -10,10 +11,12 @@ import {
   STATUS_PROCESSING,
   STATUS_SUCCESS,
 } from '../../utils/input-statuses';
+import { Localization } from '../../types/localization';
 import { FormStatusIndicator } from './FormStatusIndicator';
 
 // eslint-disable-next-line import/prefer-default-export
 export const ResetYP: FC = () => {
+  const { t } = useTranslation();
   const { setMessage } = useContext(AlertMessageContext);
 
   const [submitStatus, setSubmitStatus] = useState(null);
@@ -27,12 +30,17 @@ export const ResetYP: FC = () => {
   const resetDirectoryRegistration = async () => {
     setSubmitStatus(createInputStatus(STATUS_PROCESSING));
     try {
-      await fetchData(API_YP_RESET);
+      await fetchData(API_YP_RESET, { method: 'POST' });
       setMessage('');
       setSubmitStatus(createInputStatus(STATUS_SUCCESS));
       resetTimer = setTimeout(resetStates, RESET_TIMEOUT);
     } catch (error) {
-      setSubmitStatus(createInputStatus(STATUS_ERROR, `There was an error: ${error}`));
+      setSubmitStatus(
+        createInputStatus(
+          STATUS_ERROR,
+          t(Localization.Admin.StatusMessages.thereWasAnError, { message: `${error}` }),
+        ),
+      );
       resetTimer = setTimeout(resetStates, RESET_TIMEOUT);
     }
   };

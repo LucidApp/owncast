@@ -4,7 +4,6 @@ import (
 	"time"
 
 	"github.com/owncast/owncast/models"
-	"github.com/owncast/owncast/webserver/handlers/generated"
 )
 
 // Defaults will hold default configuration values.
@@ -26,12 +25,13 @@ type Defaults struct {
 	WebServerIP        string
 	Name               string
 	AdminPassword      string
-	StreamKeys         []generated.StreamKey
+	StreamKeys         []models.StreamKey
 
 	StreamVariants []models.StreamOutputVariant
 
 	Tags               []string
 	RTMPServerPort     int
+	RTMPBindAddress    string
 	SegmentsInPlaylist int
 
 	SegmentLengthSeconds int
@@ -52,7 +52,7 @@ func GetDefaults() Defaults {
 		ServerWelcomeMessage: "",
 		Logo:                 "logo.svg",
 		AdminPassword:        "abc123",
-		StreamKeys: []generated.StreamKey{
+		StreamKeys: []models.StreamKey{
 			{Key: &defaultStreamKey, Comment: &defaultStreamKeyComment},
 		},
 		Tags: []string{

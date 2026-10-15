@@ -5,7 +5,6 @@ import (
 
 	"github.com/owncast/owncast/models"
 	"github.com/owncast/owncast/utils"
-	"github.com/owncast/owncast/webserver/handlers/generated"
 )
 
 type ConfigRepository interface {
@@ -35,6 +34,8 @@ type ConfigRepository interface {
 	SetHTTPListenAddress(address string) error
 	GetRTMPPortNumber() int
 	SetRTMPPortNumber(port float64) error
+	GetRTMPBindAddress() string
+	SetRTMPBindAddress(address string) error
 	GetServerMetadataTags() []string
 	SetServerMetadataTags(tags []string) error
 	GetDirectoryEnabled() bool
@@ -51,6 +52,8 @@ type ConfigRepository interface {
 	SetLastDisconnectTime(disconnectTime time.Time) error
 	SetNSFW(isNSFW bool) error
 	GetNSFW() bool
+	GetAutoplay() models.AutoplayMode
+	SetAutoplay(value models.AutoplayMode) error
 	SetFfmpegPath(path string) error
 	GetFfMpegPath() string
 	GetS3Config() models.S3
@@ -67,6 +70,8 @@ type ConfigRepository interface {
 	GetChatSpamProtectionEnabled() bool
 	SetChatSlurFilterEnabled(enabled bool) error
 	GetChatSlurFilterEnabled() bool
+	SetChatRequireAuthentication(enabled bool) error
+	GetChatRequireAuthentication() bool
 	GetExternalActions() []models.ExternalAction
 	SetExternalActions(actions []models.ExternalAction) error
 	SetCustomStyles(styles string) error
@@ -75,7 +80,7 @@ type ConfigRepository interface {
 	GetCustomJavascript() string
 	SetVideoCodec(codec string) error
 	GetVideoCodec() string
-	VerifySettings() error
+	VerifySettings(temporaryStreamKey string) error
 	FindHighestVideoQualityIndex(qualities []models.StreamOutputVariant) (int, bool)
 	GetForbiddenUsernameList() []string
 	SetForbiddenUsernameList(usernames []string) error
@@ -93,6 +98,10 @@ type ConfigRepository interface {
 	GetFederationIsPrivate() bool
 	SetFederationShowEngagement(showEngagement bool) error
 	GetFederationShowEngagement() bool
+	SetFederationEnableQuotes(enabled bool) error
+	GetFederationEnableQuotes() bool
+	SetFederationHideFollowersTab(hidden bool) error
+	GetFederationHideFollowersTab() bool
 	SetBlockedFederatedDomains(domains []string) error
 	GetBlockedFederatedDomains() []string
 	SetChatJoinMessagesEnabled(enabled bool) error
@@ -115,8 +124,8 @@ type ConfigRepository interface {
 	SetCustomOfflineMessage(message string) error
 	SetCustomColorVariableValues(variables map[string]string) error
 	GetCustomColorVariableValues() map[string]string
-	GetStreamKeys() []generated.StreamKey
-	SetStreamKeys(actions []generated.StreamKey) error
+	GetStreamKeys() []models.StreamKey
+	SetStreamKeys(actions []models.StreamKey) error
 	SetDisableSearchIndexing(disableSearchIndexing bool) error
 	GetDisableSearchIndexing() bool
 	GetVideoServingEndpoint() string
@@ -127,4 +136,25 @@ type ConfigRepository interface {
 	GetPrivateKey() string
 	SetPublicKey(key string) error
 	SetPrivateKey(key string) error
+	GetFaviconPath() string
+	SetFaviconPath(favicon string) error
+}
+
+// temporaryGlobalInstance is set once during application startup so
+// helper code that has not yet been migrated to the dependency-injection
+// pattern can still reach the config repository. Get returns nil until
+// SetGlobalInstance has been called.
+var temporaryGlobalInstance ConfigRepository
+
+// SetGlobalInstance registers the application's single ConfigRepository
+// for Get to return. Called from main.go after constructing the
+// repository.
+func SetGlobalInstance(r ConfigRepository) {
+	temporaryGlobalInstance = r
+}
+
+// Get returns the global ConfigRepository registered with
+// SetGlobalInstance. Returns nil until startup has wired one in.
+func Get() ConfigRepository {
+	return temporaryGlobalInstance
 }

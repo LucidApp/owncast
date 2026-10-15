@@ -1,5 +1,6 @@
-import React, { useContext, useState, useEffect, FC } from 'react';
+import { useContext, useState, useEffect, useRef, FC } from 'react';
 import { Typography, Slider } from 'antd';
+import { useTranslation } from 'next-export-i18n';
 import { ServerStatusContext } from '../../utils/server-status-context';
 import { AlertMessageContext } from '../../utils/alert-message-context';
 import {
@@ -14,6 +15,7 @@ import {
   STATUS_PROCESSING,
   STATUS_SUCCESS,
 } from '../../utils/input-statuses';
+import { Localization } from '../../types/localization';
 import { FormStatusIndicator } from './FormStatusIndicator';
 
 const { Title } = Typography;
@@ -36,6 +38,7 @@ const SLIDER_COMMENTS = {
 
 // eslint-disable-next-line import/prefer-default-export
 export const VideoLatency: FC = () => {
+  const { t } = useTranslation();
   const [submitStatus, setSubmitStatus] = useState<StatusState>(null);
   const [selectedOption, setSelectedOption] = useState(null);
 
@@ -44,20 +47,29 @@ export const VideoLatency: FC = () => {
   const { serverConfig, setFieldInConfigState } = serverStatusData || {};
   const { videoSettings } = serverConfig || {};
 
-  let resetTimer = null;
+  const resetTimer = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (videoSettings) {
+      setSelectedOption(videoSettings.latencyLevel);
+    }
+  }, [videoSettings]);
+
+  useEffect(
+    () => () => {
+      clearTimeout(resetTimer.current);
+      resetTimer.current = null;
+    },
+    [],
+  );
 
   if (!videoSettings) {
     return null;
   }
 
-  useEffect(() => {
-    setSelectedOption(videoSettings.latencyLevel);
-  }, [videoSettings]);
-
   const resetStates = () => {
     setSubmitStatus(null);
-    resetTimer = null;
-    clearTimeout(resetTimer);
+    resetTimer.current = null;
   };
 
   // posts all the variants at once as an array obj
@@ -73,9 +85,15 @@ export const VideoLatency: FC = () => {
           value: postValue,
           path: 'videoSettings',
         });
-        setSubmitStatus(createInputStatus(STATUS_SUCCESS, 'Latency buffer level updated.'));
+        setSubmitStatus(
+          createInputStatus(
+            STATUS_SUCCESS,
+            t(Localization.Admin.StatusMessages.latencyBufferUpdated),
+          ),
+        );
 
-        resetTimer = setTimeout(resetStates, RESET_TIMEOUT);
+        clearTimeout(resetTimer.current);
+        resetTimer.current = window.setTimeout(resetStates, RESET_TIMEOUT);
         if (serverStatusData.online) {
           setMessage(
             'Your latency buffer setting will take effect the next time you begin a live stream.',
@@ -85,7 +103,8 @@ export const VideoLatency: FC = () => {
       onError: (message: string) => {
         setSubmitStatus(createInputStatus(STATUS_ERROR, message));
 
-        resetTimer = setTimeout(resetStates, RESET_TIMEOUT);
+        clearTimeout(resetTimer.current);
+        resetTimer.current = window.setTimeout(resetStates, RESET_TIMEOUT);
       },
     });
   };
@@ -118,7 +137,7 @@ export const VideoLatency: FC = () => {
 
       <div className="segment-slider-container">
         <Slider
-          tipFormatter={value => SLIDER_COMMENTS[value]}
+          tooltip={{ formatter: value => SLIDER_COMMENTS[value] }}
           onChange={handleChange}
           min={0}
           max={4}

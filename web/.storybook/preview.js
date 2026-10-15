@@ -1,11 +1,24 @@
 import '../styles/variables.css';
-import '../styles/global.less';
-import '../styles/theme.less';
+// Pre-extracted Ant Design styles: required in zeroRuntime mode (see
+// build-scripts/extract-antd-styles.js).
+import '../styles/antd.css';
+// video.js core styles + local overrides, mirroring pages/_app.tsx. Without
+// these the player stories render as an unstyled black rectangle.
+import 'video.js/dist/video-js.css';
+import '../components/video/VideoJS/VideoJS.scss';
 import './preview.scss';
-import { themes } from '@storybook/theming';
+import { themes } from 'storybook/theming';
 import { DocsContainer } from './storybook-theme';
-import { INITIAL_VIEWPORTS } from '@storybook/addon-viewport';
+import { INITIAL_VIEWPORTS } from 'storybook/viewport';
 import _ from 'lodash';
+import { initialize, mswLoader } from 'msw-storybook-addon';
+import React from 'react';
+import { Provider, useSetAtom } from 'jotai';
+import { AntdProvider } from '../components/theme/AntdProvider';
+import { Theme } from '../components/theme/Theme';
+import { clientConfigStateAtom } from '../components/stores/ClientConfigStore';
+import { makeEmptyClientConfig } from '../interfaces/client-config.model';
+import THEMES from '../stories/themePresets';
 
 /**
  * Takes an entry of a viewport (from Object.entries()) and converts it
@@ -13,8 +26,8 @@ import _ from 'lodash';
  *
  * @template {string} Key
  *
- * @param {[Key, import('@storybook/addon-viewport/dist/ts3.9/models').Viewport]} entry
- * @returns {Array<[`${Key}${'Portrait' | 'Landscape'}`, import('@storybook/addon-viewport/dist/ts3.9/models').Viewport]>}
+ * @param {[Key, import('storybook/viewport/dist/ts3.9/models').Viewport]} entry
+ * @returns {Array<[`${Key}${'Portrait' | 'Landscape'}`, import('storybook/viewport/dist/ts3.9/models').Viewport]>}
  */
 const convertToLandscapeAndPortraitEntries = ([objectKey, viewport]) => {
   const pixelStringToNumber = str => parseInt(str.split('px')[0]);
@@ -67,15 +80,14 @@ const convertToLandscapeAndPortraitEntries = ([objectKey, viewport]) => {
  */
 const flatMapObject = (obj, f) => Object.fromEntries(Object.entries(obj).flatMap(f));
 
+// Initialize MSW
+initialize();
+
 export const parameters = {
-  fetchMock: {
-    mocks: [],
-  },
   // actions: { argTypesRegex: '^on[A-Z].*' },
   docs: {
     container: DocsContainer,
   },
-  // actions: { argTypesRegex: '^on[A-Z].*' },
   viewMode: 'docs',
   controls: {
     matchers: {
@@ -99,8 +111,81 @@ export const parameters = {
     light: { ...themes.normal },
   },
   viewport: {
-    // Take a bunch of viewports from the storybook addon and convert them
-    // to portrait + landscape. Keys are appended with 'Landscape' or 'Portrait'.
-    viewports: flatMapObject(INITIAL_VIEWPORTS, convertToLandscapeAndPortraitEntries),
+    // Keep the base viewport keys (stories reference 'tablet', 'mobile1', ...)
+    // and add the rotated variants; replacing `options` wholesale would drop
+    // the base names and every viewport-pinned story would silently render
+    // at the default desktop width (Chromatic captures included).
+    options: {
+      ...INITIAL_VIEWPORTS,
+      ...flatMapObject(INITIAL_VIEWPORTS, convertToLandscapeAndPortraitEntries),
+    },
   },
 };
+
+export const loaders = [mswLoader];
+
+// Toolbar switcher for the appearance-theme presets (stories/themePresets).
+// Applies the selected preset through the two real theming paths — the
+// clientConfig atom (AntdProvider maps it onto antd design tokens) and the
+// Theme component (emits the --theme-* CSS variables) — so any end-user
+// story can be checked against custom themes, not just the Theme
+// playground. Admin stories are exempt: the admin UI is not themed.
+export const globalTypes = {
+  owncastTheme: {
+    description: 'Owncast appearance theme preset',
+    toolbar: {
+      title: 'Theme',
+      icon: 'paintbrush',
+      items: Object.entries(THEMES).map(([value, t]) => ({ value, title: t.label })),
+      dynamicTitle: true,
+    },
+  },
+};
+
+export const initialGlobals = { owncastTheme: 'default' };
+
+const ApplyStorybookTheme = ({ theme, children }) => {
+  const setClientConfig = useSetAtom(clientConfigStateAtom);
+  const preset = theme !== 'default' && THEMES[theme];
+  React.useEffect(() => {
+    if (preset) {
+      setClientConfig({
+        ...makeEmptyClientConfig(),
+        appearanceVariables: preset.variables,
+      });
+    }
+  }, [preset, setClientConfig]);
+  if (!preset) {
+    return children;
+  }
+  return (
+    <>
+      <Theme />
+      {children}
+    </>
+  );
+};
+
+// Mirror the app-wide providers from pages/_app.tsx: antd components rely on
+// AntdProvider for the Owncast theme tokens. Without this decorator those
+// stories would render unthemed. AntdProvider reads jotai atoms, so a
+// Provider wraps it (stories with their own Provider simply nest; that
+// is supported). The Provider is keyed by the selected toolbar theme so
+// switching themes starts from a fresh store instead of layering presets.
+export const decorators = [
+  (Story, context) => {
+    // Appearance themes only apply to the end-user experience; the admin
+    // interface never receives appearanceVariables.
+    const isAdminStory = context.id.startsWith('owncast-admin');
+    const theme = isAdminStory ? 'default' : context.globals.owncastTheme;
+    return (
+      <Provider key={theme || 'default'}>
+        <AntdProvider>
+          <ApplyStorybookTheme theme={theme}>
+            <Story />
+          </ApplyStorybookTheme>
+        </AntdProvider>
+      </Provider>
+    );
+  },
+];

@@ -4,25 +4,24 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/owncast/owncast/config"
-	"github.com/owncast/owncast/core/transcoder"
-	"github.com/owncast/owncast/models"
-	"github.com/owncast/owncast/persistence/configrepository"
-	"github.com/owncast/owncast/utils"
-	"github.com/owncast/owncast/webserver/handlers/generated"
-	"github.com/owncast/owncast/webserver/router/middleware"
 	log "github.com/sirupsen/logrus"
+
+	"github.com/owncast/owncast/models"
+	"github.com/owncast/owncast/services/transcoder"
+	"github.com/owncast/owncast/utils"
+	"github.com/owncast/owncast/webserver/router/middleware"
 )
 
 // GetServerConfig gets the config details of the server.
-func GetServerConfig(w http.ResponseWriter, r *http.Request) {
-	configRepository := configrepository.Get()
+func (a *Admin) GetServerConfig(w http.ResponseWriter, r *http.Request) {
+	configRepository := a.configRepository
 	ffmpeg := utils.ValidatedFfmpegPath(configRepository.GetFfMpegPath())
 	usernameBlocklist := configRepository.GetForbiddenUsernameList()
 	usernameSuggestions := configRepository.GetSuggestedUsernamesList()
 
-	videoQualityVariants := make([]models.StreamOutputVariant, 0)
-	for _, variant := range configRepository.GetStreamOutputVariants() {
+	streamOutputVariants := configRepository.GetStreamOutputVariants()
+	videoQualityVariants := make([]models.StreamOutputVariant, 0, len(streamOutputVariants))
+	for _, variant := range streamOutputVariants {
 		videoQualityVariants = append(videoQualityVariants, models.StreamOutputVariant{
 			Name:               variant.GetName(),
 			IsAudioPassthrough: variant.GetIsAudioPassthrough(),
@@ -47,6 +46,7 @@ func GetServerConfig(w http.ResponseWriter, r *http.Request) {
 			Logo:                configRepository.GetLogoPath(),
 			SocialHandles:       configRepository.GetSocialHandles(),
 			NSFW:                configRepository.GetNSFW(),
+			Autoplay:            configRepository.GetAutoplay(),
 			CustomStyles:        configRepository.GetCustomStyles(),
 			CustomJavascript:    configRepository.GetCustomJavascript(),
 			AppearanceVariables: configRepository.GetCustomColorVariableValues(),
@@ -54,10 +54,11 @@ func GetServerConfig(w http.ResponseWriter, r *http.Request) {
 		FFmpegPath:                ffmpeg,
 		AdminPassword:             configRepository.GetAdminPassword(),
 		StreamKeys:                configRepository.GetStreamKeys(),
-		StreamKeyOverridden:       config.TemporaryStreamKey != "",
-		WebServerPort:             config.WebServerPort,
-		WebServerIP:               config.WebServerIP,
+		StreamKeyOverridden:       a.cfg.TemporaryStreamKey != "",
+		WebServerPort:             a.cfg.WebServerPort,
+		WebServerIP:               a.cfg.WebServerIP,
 		RTMPServerPort:            configRepository.GetRTMPPortNumber(),
+		RTMPServerAddress:         configRepository.GetRTMPBindAddress(),
 		ChatDisabled:              configRepository.GetChatDisabled(),
 		ChatJoinMessagesEnabled:   configRepository.GetChatJoinPartMessagesEnabled(),
 		SocketHostOverride:        configRepository.GetWebsocketOverrideHost(),
@@ -65,6 +66,7 @@ func GetServerConfig(w http.ResponseWriter, r *http.Request) {
 		ChatEstablishedUserMode:   configRepository.GetChatEstbalishedUsersOnlyMode(),
 		ChatSpamProtectionEnabled: configRepository.GetChatSpamProtectionEnabled(),
 		ChatSlurFilterEnabled:     configRepository.GetChatSlurFilterEnabled(),
+		ChatRequireAuthentication: configRepository.GetChatRequireAuthentication(),
 		HideViewerCount:           configRepository.GetHideViewerCount(),
 		DisableSearchIndexing:     configRepository.GetDisableSearchIndexing(),
 		VideoSettings: videoSettings{
@@ -77,17 +79,20 @@ func GetServerConfig(w http.ResponseWriter, r *http.Request) {
 		},
 		S3:                 configRepository.GetS3Config(),
 		ExternalActions:    configRepository.GetExternalActions(),
+		StyleContributors:  a.styleContributorsOrEmpty(),
 		SupportedCodecs:    transcoder.GetCodecs(ffmpeg),
 		VideoCodec:         configRepository.GetVideoCodec(),
 		ForbiddenUsernames: usernameBlocklist,
 		SuggestedUsernames: usernameSuggestions,
 		Federation: federationConfigResponse{
-			Enabled:        configRepository.GetFederationEnabled(),
-			IsPrivate:      configRepository.GetFederationIsPrivate(),
-			Username:       configRepository.GetFederationUsername(),
-			GoLiveMessage:  configRepository.GetFederationGoLiveMessage(),
-			ShowEngagement: configRepository.GetFederationShowEngagement(),
-			BlockedDomains: configRepository.GetBlockedFederatedDomains(),
+			Enabled:          configRepository.GetFederationEnabled(),
+			IsPrivate:        configRepository.GetFederationIsPrivate(),
+			Username:         configRepository.GetFederationUsername(),
+			GoLiveMessage:    configRepository.GetFederationGoLiveMessage(),
+			ShowEngagement:   configRepository.GetFederationShowEngagement(),
+			EnableQuotes:     configRepository.GetFederationEnableQuotes(),
+			HideFollowersTab: configRepository.GetFederationHideFollowersTab(),
+			BlockedDomains:   configRepository.GetBlockedFederatedDomains(),
 		},
 		Notifications: notificationsConfigResponse{
 			Discord: configRepository.GetDiscordConfig(),
@@ -101,6 +106,21 @@ func GetServerConfig(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(response); err != nil {
 		log.Errorln(err)
 	}
+}
+
+// styleContributorsOrEmpty returns the plugin page-styling report, or
+// an empty (non-nil) slice when the getter is unset (no plugin host) or
+// returns nothing. The empty-slice contract keeps the JSON wire shape
+// stable: `styleContributors: []` rather than null, so the admin UI
+// doesn't need a defensive nil-check before iterating.
+func (a *Admin) styleContributorsOrEmpty() []models.PluginStyleInfo {
+	if a.pluginStyleContributors == nil {
+		return []models.PluginStyleInfo{}
+	}
+	if c := a.pluginStyleContributors(); len(c) > 0 {
+		return c
+	}
+	return []models.PluginStyleInfo{}
 }
 
 type serverConfigAdminResponse struct {
@@ -117,17 +137,20 @@ type serverConfigAdminResponse struct {
 	Federation                federationConfigResponse    `json:"federation"`
 	SupportedCodecs           []string                    `json:"supportedCodecs"`
 	ExternalActions           []models.ExternalAction     `json:"externalActions"`
+	StyleContributors         []models.PluginStyleInfo    `json:"styleContributors"`
 	ForbiddenUsernames        []string                    `json:"forbiddenUsernames"`
 	SuggestedUsernames        []string                    `json:"suggestedUsernames"`
-	StreamKeys                []generated.StreamKey       `json:"streamKeys"`
+	StreamKeys                []models.StreamKey          `json:"streamKeys"`
 	VideoSettings             videoSettings               `json:"videoSettings"`
 	RTMPServerPort            int                         `json:"rtmpServerPort"`
+	RTMPServerAddress         string                      `json:"rtmpServerAddress"`
 	WebServerPort             int                         `json:"webServerPort"`
 	ChatDisabled              bool                        `json:"chatDisabled"`
 	ChatJoinMessagesEnabled   bool                        `json:"chatJoinMessagesEnabled"`
 	ChatEstablishedUserMode   bool                        `json:"chatEstablishedUserMode"`
 	ChatSpamProtectionEnabled bool                        `json:"chatSpamProtectionEnabled"`
 	ChatSlurFilterEnabled     bool                        `json:"chatSlurFilterEnabled"`
+	ChatRequireAuthentication bool                        `json:"chatRequireAuthentication"`
 	DisableSearchIndexing     bool                        `json:"disableSearchIndexing"`
 	StreamKeyOverridden       bool                        `json:"streamKeyOverridden"`
 	HideViewerCount           bool                        `json:"hideViewerCount"`
@@ -153,6 +176,7 @@ type webConfigResponse struct {
 	Tags                []string              `json:"tags"`
 	SocialHandles       []models.SocialHandle `json:"socialHandles"`
 	NSFW                bool                  `json:"nsfw"`
+	Autoplay            models.AutoplayMode   `json:"autoplay"`
 }
 
 type yp struct {
@@ -162,12 +186,14 @@ type yp struct {
 }
 
 type federationConfigResponse struct {
-	Username       string   `json:"username"`
-	GoLiveMessage  string   `json:"goLiveMessage"`
-	BlockedDomains []string `json:"blockedDomains"`
-	Enabled        bool     `json:"enabled"`
-	IsPrivate      bool     `json:"isPrivate"`
-	ShowEngagement bool     `json:"showEngagement"`
+	Username         string   `json:"username"`
+	GoLiveMessage    string   `json:"goLiveMessage"`
+	BlockedDomains   []string `json:"blockedDomains"`
+	Enabled          bool     `json:"enabled"`
+	IsPrivate        bool     `json:"isPrivate"`
+	ShowEngagement   bool     `json:"showEngagement"`
+	EnableQuotes     bool     `json:"enableQuotes"`
+	HideFollowersTab bool     `json:"hideFollowersTab"`
 }
 
 type notificationsConfigResponse struct {

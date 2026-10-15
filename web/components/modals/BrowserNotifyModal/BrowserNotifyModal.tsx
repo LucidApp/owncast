@@ -1,9 +1,8 @@
-import { Row, Spin, Typography, Button, Alert } from 'antd';
-import React, { FC, useState } from 'react';
-import UploadOutlined from '@ant-design/icons/lib/icons/UploadOutlined';
-import PlusSquareOutlined from '@ant-design/icons/lib/icons/PlusSquareOutlined';
-import { useRecoilValue } from 'recoil';
-import { ErrorBoundary } from 'react-error-boundary';
+import { Row, Spin, Typography, Button, Alert, Modal } from 'antd';
+import { FC, useState } from 'react';
+import { PlusSquareOutlined, UploadOutlined } from '@ant-design/icons';
+import { useAtomValue } from 'jotai';
+import { ErrorBoundary, getErrorMessage } from 'react-error-boundary';
 import { useTranslation } from 'next-export-i18n';
 import { accessTokenAtom, clientConfigStateAtom } from '../../stores/ClientConfigStore';
 import {
@@ -204,11 +203,11 @@ const NotificationsDenied = () => (
   </div>
 );
 
-export const BrowserNotifyModal = () => {
+const NotifyModalContent = () => {
   const { t } = useTranslation();
   const [error, setError] = useState<string>(null);
-  const accessToken = useRecoilValue(accessTokenAtom);
-  const config = useRecoilValue(clientConfigStateAtom);
+  const accessToken = useAtomValue(accessTokenAtom);
+  const config = useAtomValue(clientConfigStateAtom);
   const [browserPushPermissionsPending, setBrowserPushPermissionsPending] =
     useState<boolean>(false);
   const notificationsPermitted =
@@ -271,7 +270,7 @@ export const BrowserNotifyModal = () => {
       fallbackRender={({ error: e, resetErrorBoundary }) => (
         <ComponentError
           componentName="BrowserNotifyModal"
-          message={e.message}
+          message={getErrorMessage(e)}
           retryFunction={resetErrorBoundary}
         />
       )}
@@ -282,15 +281,10 @@ export const BrowserNotifyModal = () => {
             translationKey={Localization.Frontend.BrowserNotifyModal.mainDescription}
             defaultText="Get notified right in the browser each time this stream goes live."
           />
-          <span>
-            <a href="https://owncast.online/docs/notifications/#browser-notifications">
-              <Translation
-                translationKey={Localization.Frontend.BrowserNotifyModal.learnMore}
-                defaultText="Learn more"
-              />
-            </a>
-            &nbsp; about Owncast browser notifications.
-          </span>
+          <Translation
+            translationKey={Localization.Frontend.BrowserNotifyModal.learnMoreAboutNotifications}
+            defaultText="<a href='https://owncast.online/docs/notifications/#browser-notifications'>Learn more</a> about Owncast browser notifications."
+          />
         </Row>
         <Row>
           {error && (
@@ -314,3 +308,29 @@ export const BrowserNotifyModal = () => {
     </ErrorBoundary>
   );
 };
+
+/*
+Browser notifications modal (theming comes from the app-wide AntdProvider in
+pages/_app.tsx). Renders its own Modal shell instead of the shared ui/Modal.
+The #modal-container identifier is part of the documented CSS customization
+contract, so it is preserved inside the shell.
+*/
+export type BrowserNotifyModalProps = {
+  open: boolean;
+  handleClose: () => void;
+};
+
+export const BrowserNotifyModal: FC<BrowserNotifyModalProps> = ({ open, handleClose }) => (
+  <Modal
+    title="Browser Notifications"
+    open={open}
+    onCancel={handleClose}
+    zIndex={999}
+    footer={null}
+    centered
+  >
+    <div id="modal-container">
+      <NotifyModalContent />
+    </div>
+  </Modal>
+);

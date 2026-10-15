@@ -1,7 +1,7 @@
 // TODO: add a notication after updating info that changes will take place either on a new stream or server restart. may be different for each field.
 
 import React, { useState, useEffect, FC, ReactElement } from 'react';
-
+import { AutoplaySetting } from './autoplay';
 import { STATUS, fetchData, FETCH_INTERVAL, SERVER_CONFIG } from './apis';
 import { ConfigDetails, UpdateArgs } from '../types/config-section';
 import { DEFAULT_VARIANT_STATE } from './config-constants';
@@ -17,6 +17,7 @@ const initialServerConfigState: ConfigDetails = {
     logo: '',
     name: '',
     nsfw: false,
+    autoplay: AutoplaySetting.Off,
     socialHandles: [],
     streamTitle: '',
     summary: '',
@@ -28,6 +29,7 @@ const initialServerConfigState: ConfigDetails = {
   },
   ffmpegPath: '',
   rtmpServerPort: '',
+  rtmpServerAddress: '',
   webServerPort: '',
   socketHostOverride: null,
   videoServingEndpoint: '',
@@ -57,6 +59,8 @@ const initialServerConfigState: ConfigDetails = {
     username: '',
     goLiveMessage: '',
     showEngagement: true,
+    enableQuotes: true,
+    hideFollowersTab: false,
     blockedDomains: [],
   },
   notifications: {
@@ -64,6 +68,7 @@ const initialServerConfigState: ConfigDetails = {
     discord: { enabled: false, webhook: '', goLiveMessage: '' },
   },
   externalActions: [],
+  styleContributors: [],
   supportedCodecs: [],
   videoCodec: '',
   forbiddenUsernames: [],
@@ -71,6 +76,7 @@ const initialServerConfigState: ConfigDetails = {
   chatDisabled: false,
   chatSpamProtectionEnabled: true,
   chatSlurFilterEnabled: false,
+  chatRequireAuthentication: false,
   chatJoinMessagesEnabled: true,
   chatEstablishedUserMode: false,
   hideViewerCount: false,
@@ -127,6 +133,7 @@ const ServerStatusProvider: FC<ServerStatusProviderProps> = ({ children }) => {
 
       setStatus({ ...result, error: { type: null, msg: null } });
     } catch (error) {
+      console.error('Failed to fetch server status:', error);
       setStatus(initialStatus => ({
         ...initialStatus,
         error: {
@@ -134,7 +141,6 @@ const ServerStatusProvider: FC<ServerStatusProviderProps> = ({ children }) => {
           msg: 'Cannot connect to the Owncast service. Please check you are connected to the internet and the Owncast server is running.',
         },
       }));
-      // todo
     }
   };
   const getConfig = async () => {
